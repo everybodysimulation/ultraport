@@ -33,10 +33,12 @@ jobs:
           count=$(find StreamingAssets/aa/WebGL -maxdepth 1 -type f -name '*.bundle' | wc -l)
           echo "Found $count Addressables bundles"
           test "$count" -eq 80
-          if find StreamingAssets/aa/WebGL -maxdepth 1 -type f -name '*.bundle' -exec sh -c 'head -c 100 "$1" | grep -q "git-lfs.github.com/spec"' _ {} \; | grep -q .; then
-            echo "At least one bundle is still an LFS pointer"
-            exit 1
-          fi
+          for file in StreamingAssets/aa/WebGL/*.bundle; do
+            if head -c 100 "$file" | grep -q "git-lfs.github.com/spec"; then
+              echo "LFS pointer was not downloaded: $file"
+              exit 1
+            fi
+          done
           du -sh Build StreamingAssets/aa/WebGL
 
       - name: Publish files as GitHub Release assets
