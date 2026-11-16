@@ -154,8 +154,8 @@ jobs:
               marker = "async function loadUnityGame() {"
               html = html.replace(marker, helper + "\n      " + marker, 1)
 
-          old_start = "\\n".join(["        loadingBar.style.display = \"block\";", "        var script = document.createElement(\"script\");"])
-          new_start = "\\n".join([
+          old_start = "\n".join(["        loadingBar.style.display = \"block\";", "        var script = document.createElement(\"script\");"])
+          new_start = "\n".join([
               "        loadingBar.style.display = \"block\";",
               "        try {",
               "          await prepareAssetWorker();",
