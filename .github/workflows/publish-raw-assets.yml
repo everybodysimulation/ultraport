@@ -1,11 +1,6 @@
 name: Publish raw GitHub-hosted ULTRAKILL assets
 
-on:
-  workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/publish-raw-assets.yml
+on: [workflow_dispatch, push]
 
 permissions:
   contents: write
