@@ -154,22 +154,23 @@ jobs:
               marker = "async function loadUnityGame() {"
               html = html.replace(marker, helper + "\n      " + marker, 1)
 
-          old_start = '''        loadingBar.style.display = "block";
-        var script = document.createElement("script");'''
-          new_start = '''        loadingBar.style.display = "block";
-        try {
-          await prepareAssetWorker();
-        } catch (err) {
-          var errorText = loadingBar.querySelector("p");
-          if (!errorText) {
-            errorText = document.createElement("p");
-            loadingBar.appendChild(errorText);
-          }
-          errorText.textContent = "Asset setup failed: " + err.message;
-          booted = false;
-          return;
-        }
-        var script = document.createElement("script");'''
+          old_start = "\\n".join(["        loadingBar.style.display = \"block\";", "        var script = document.createElement(\"script\");"])
+          new_start = "\\n".join([
+              "        loadingBar.style.display = \"block\";",
+              "        try {",
+              "          await prepareAssetWorker();",
+              "        } catch (err) {",
+              "          var errorText = loadingBar.querySelector(\"p\");",
+              "          if (!errorText) {",
+              "            errorText = document.createElement(\"p\");",
+              "            loadingBar.appendChild(errorText);",
+              "          }",
+              "          errorText.textContent = \"Asset setup failed: \" + err.message;",
+              "          booted = false;",
+              "          return;",
+              "        }",
+              "        var script = document.createElement(\"script\");"
+          ])
           if old_start not in html:
               raise SystemExit("Could not find Unity loader insertion point in index.html")
           html = html.replace(old_start, new_start, 1)
