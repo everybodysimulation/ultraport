@@ -31,7 +31,7 @@ jobs:
               Path("Build/WebGL.wasm.unityweb"),
           ] + [Path(p) for p in sorted(glob.glob("StreamingAssets/aa/WebGL/*.bundle"))]
 
-          if len(sources) != 83:
+          if len(sources) != 84:
               raise SystemExit(f"Expected 84 assets (4 runtime + 80 bundles), found {len(sources)}")
 
           stage = Path("/tmp/ultrakill-raw-stage")
