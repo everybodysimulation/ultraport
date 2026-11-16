@@ -25,13 +25,14 @@ jobs:
           from pathlib import Path
 
           sources = [
+              Path("Build/WebGL.loader.js"),
               Path("Build/WebGL.data.unityweb"),
               Path("Build/WebGL.framework.js.unityweb"),
               Path("Build/WebGL.wasm.unityweb"),
           ] + [Path(p) for p in sorted(glob.glob("StreamingAssets/aa/WebGL/*.bundle"))]
 
           if len(sources) != 83:
-              raise SystemExit(f"Expected 83 assets (3 runtime + 80 bundles), found {len(sources)}")
+              raise SystemExit(f"Expected 84 assets (4 runtime + 80 bundles), found {len(sources)}")
 
           stage = Path("/tmp/ultrakill-raw-stage")
           assets = stage / "assets"
@@ -127,6 +128,11 @@ jobs:
                   raise SystemExit(f"Expected runtime URL not found in index.html: {filename}")
               html = html.replace(old, new_base + filename)
 
+          loader_assignment = 'var loaderUrl = buildUrl + "/WebGL.loader.js";'
+          if loader_assignment not in html:
+              raise SystemExit("Expected local Unity loader URL not found in index.html")
+          html = html.replace(loader_assignment, 'var loaderUrl = "' + base + 'WebGL.loader.js";', 1)
+
           if "async function loadUnityGame()" not in html:
               html = html.replace("function loadUnityGame() {", "async function loadUnityGame() {")
           if "async function loadUnityGame()" not in html:
@@ -175,7 +181,7 @@ jobs:
               raise SystemExit("Could not find Unity loader insertion point in index.html")
           html = html.replace(old_start, new_start, 1)
           index_path.write_text(html)
-          print("Rewrote 80 catalog bundle IDs and 3 Unity runtime URLs.")
+          print("Rewrote 80 catalog bundle IDs, 3 Unity runtime URLs, and the Unity loader URL.")
           PY
 
           cat > service-worker.js <<'SW'
