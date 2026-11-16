@@ -48,9 +48,9 @@
       var buildUrl = "Build";
       var loaderUrl = buildUrl + "/WebGL.loader.js";
       var config = {
-        dataUrl: "https://github.com/everyonesim/ultraport/releases/download/webgl-assets-v1/WebGL.data.unityweb",
-        frameworkUrl: "https://github.com/everyonesim/ultraport/releases/download/webgl-assets-v1/WebGL.framework.js.unityweb",
-        codeUrl: "https://github.com/everyonesim/ultraport/releases/download/webgl-assets-v1/WebGL.wasm.unityweb",
+        dataUrl: "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.data.unityweb",
+        frameworkUrl: "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.framework.js.unityweb",
+        codeUrl: "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.wasm.unityweb",
         streamingAssetsUrl: "StreamingAssets",
         companyName: "Hakita",
         productName: "ULTRAKILL",
@@ -126,10 +126,40 @@
         e.returnValue = "";
         return "";
       });
-      function loadUnityGame() {
+      
+async function prepareAssetWorker() {
+  if (!("serviceWorker" in navigator)) throw new Error("This browser does not support service workers.");
+  await navigator.serviceWorker.register("service-worker.js");
+  await navigator.serviceWorker.ready;
+  if (!navigator.serviceWorker.controller) {
+    await new Promise(function(resolve, reject) {
+      var timer = setTimeout(function() {
+        reject(new Error("The asset worker did not take control. Please reload and try again."));
+      }, 20000);
+      navigator.serviceWorker.addEventListener("controllerchange", function() {
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+    });
+  }
+}
+
+      async function loadUnityGame() {
         if (booted) return;
         booted = true;
         loadingBar.style.display = "block";
+        try {
+          await prepareAssetWorker();
+        } catch (err) {
+          var errorText = loadingBar.querySelector("p");
+          if (!errorText) {
+            errorText = document.createElement("p");
+            loadingBar.appendChild(errorText);
+          }
+          errorText.textContent = "Asset setup failed: " + err.message;
+          booted = false;
+          return;
+        }
         var script = document.createElement("script");
         script.src = loaderUrl;
         script.onload = function() {
