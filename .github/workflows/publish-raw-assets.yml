@@ -1,0 +1,240 @@
+name: Publish raw GitHub-hosted ULTRAKILL assets
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out game files
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 1
+
+      - name: Verify and split assets into GitHub-safe chunks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, json, os
+          from pathlib import Path
+
+          sources = [
+              Path("Build/WebGL.data.unityweb"),
+              Path("Build/WebGL.framework.js.unityweb"),
+              Path("Build/WebGL.wasm.unityweb"),
+          ] + [Path(p) for p in sorted(glob.glob("StreamingAssets/aa/WebGL/*.bundle"))]
+
+          if len(sources) != 83:
+              raise SystemExit(f"Expected 83 assets (3 runtime + 80 bundles), found {len(sources)}")
+
+          stage = Path("/tmp/ultrakill-raw-stage")
+          assets = stage / "assets"
+          assets.mkdir(parents=True, exist_ok=True)
+          manifest = {"files": {}}
+          chunk_size = 80 * 1024 * 1024
+
+          for src in sources:
+              if not src.is_file() or src.stat().st_size == 0:
+                  raise SystemExit(f"Missing or empty asset: {src}")
+              with src.open("rb") as inp:
+                  chunks = []
+                  number = 0
+                  while True:
+                      data = inp.read(chunk_size)
+                      if not data:
+                          break
+                      chunk_name = f"{src.name}.part{number:03d}"
+                      out = assets / chunk_name
+                      out.write_bytes(data)
+                      chunks.append(f"assets/{chunk_name}")
+                      number += 1
+              manifest["files"][src.name] = {
+                  "size": src.stat().st_size,
+                  "chunks": chunks
+              }
+              print(f"{src.name}: {src.stat().st_size:,} bytes -> {len(chunks)} chunk(s)")
+
+          (stage / "manifest.json").write_text(json.dumps(manifest, separators=(",", ":")))
+          print(f"Prepared {len(manifest['files'])} files in {sum(len(x['chunks']) for x in manifest['files'].values())} chunks")
+          PY
+
+      - name: Publish assets on a clean orphan branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan asset-host
+          git rm -rf . >/dev/null 2>&1 || true
+          git clean -fdx
+          mkdir -p assets
+          cp /tmp/ultrakill-raw-stage/assets/* assets/
+          cp /tmp/ultrakill-raw-stage/manifest.json manifest.json
+          git add -f assets manifest.json
+          git commit -m "Publish chunked ULTRAKILL WebGL assets"
+          git push --force origin HEAD:asset-host
+
+      - name: Rewrite the game to use the raw asset branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B main origin/main
+          python3 - <<'PY'
+          import glob, json
+          from pathlib import Path
+          from urllib.parse import unquote, quote
+
+          bundle_names = {Path(p).name for p in glob.glob("StreamingAssets/aa/WebGL/*.bundle")}
+          if len(bundle_names) != 80:
+              raise SystemExit(f"Expected 80 bundle names, found {len(bundle_names)}")
+
+          catalog_path = Path("StreamingAssets/aa/catalog.json")
+          catalog = json.loads(catalog_path.read_text())
+          ids = catalog.get("m_InternalIds")
+          if not isinstance(ids, list):
+              raise SystemExit("catalog.json has no m_InternalIds array")
+
+          base = "https://everyonesim.github.io/ultraport/asset-proxy/"
+          changed = set()
+          for i, value in enumerate(ids):
+              if not isinstance(value, str):
+                  continue
+              filename = unquote(value.split("?", 1)[0].split("#", 1)[0].rsplit("/", 1)[-1])
+              if filename in bundle_names:
+                  ids[i] = base + quote(filename)
+                  changed.add(filename)
+
+          if changed != bundle_names:
+              missing = sorted(bundle_names - changed)
+              raise SystemExit(f"Catalog rewrite incomplete: changed {len(changed)}/80; missing={missing[:5]}")
+
+          catalog_path.write_text(json.dumps(catalog, separators=(",", ":")))
+
+          index_path = Path("index.html")
+          html = index_path.read_text()
+          old_base = "https://github.com/everyonesim/ultraport/releases/download/webgl-assets-v1/"
+          new_base = base
+          for filename in ("WebGL.data.unityweb", "WebGL.framework.js.unityweb", "WebGL.wasm.unityweb"):
+              old = old_base + filename
+              if old not in html:
+                  raise SystemExit(f"Expected runtime URL not found in index.html: {filename}")
+              html = html.replace(old, new_base + filename)
+
+          if "async function loadUnityGame()" not in html:
+              html = html.replace("function loadUnityGame() {", "async function loadUnityGame() {")
+          if "async function loadUnityGame()" not in html:
+              raise SystemExit("Could not make loadUnityGame async")
+
+          helper = """
+          async function prepareAssetWorker() {
+            if (!("serviceWorker" in navigator)) throw new Error("This browser does not support service workers.");
+            await navigator.serviceWorker.register("service-worker.js");
+            await navigator.serviceWorker.ready;
+            if (!navigator.serviceWorker.controller) {
+              await new Promise(function(resolve, reject) {
+                var timer = setTimeout(function() {
+                  reject(new Error("The asset worker did not take control. Please reload and try again."));
+                }, 20000);
+                navigator.serviceWorker.addEventListener("controllerchange", function() {
+                  clearTimeout(timer);
+                  resolve();
+                }, { once: true });
+              });
+            }
+          }
+          """
+          if "async function prepareAssetWorker()" not in html:
+              marker = "async function loadUnityGame() {"
+              html = html.replace(marker, helper + "\n      " + marker, 1)
+
+          old_start = '''        loadingBar.style.display = "block";
+        var script = document.createElement("script");'''
+          new_start = '''        loadingBar.style.display = "block";
+        try {
+          await prepareAssetWorker();
+        } catch (err) {
+          var errorText = loadingBar.querySelector("p");
+          if (!errorText) {
+            errorText = document.createElement("p");
+            loadingBar.appendChild(errorText);
+          }
+          errorText.textContent = "Asset setup failed: " + err.message;
+          booted = false;
+          return;
+        }
+        var script = document.createElement("script");'''
+          if old_start not in html:
+              raise SystemExit("Could not find Unity loader insertion point in index.html")
+          html = html.replace(old_start, new_start, 1)
+          index_path.write_text(html)
+          print("Rewrote 80 catalog bundle IDs and 3 Unity runtime URLs.")
+          PY
+
+          cat > service-worker.js <<'SW'
+          const RAW_ROOT = "https://raw.githubusercontent.com/everyonesim/ultraport/asset-host/";
+          const PROXY_PATH = new URL(self.registration.scope).pathname + "asset-proxy/";
+
+          self.addEventListener("install", event => event.waitUntil(self.skipWaiting()));
+          self.addEventListener("activate", event => event.waitUntil(self.clients.claim()));
+
+          let manifestPromise;
+          function getManifest() {
+            if (!manifestPromise) {
+              manifestPromise = fetch(RAW_ROOT + "manifest.json")
+                .then(response => {
+                  if (!response.ok) throw new Error("Asset manifest HTTP " + response.status);
+                  return response.json();
+                });
+            }
+            return manifestPromise;
+          }
+
+          self.addEventListener("fetch", event => {
+            const url = new URL(event.request.url);
+            if (url.origin !== self.location.origin || !url.pathname.startsWith(PROXY_PATH)) return;
+
+            event.respondWith((async () => {
+              const filename = decodeURIComponent(url.pathname.slice(PROXY_PATH.length));
+              if (!filename || filename.includes("/") || filename.includes("..")) {
+                return new Response("Invalid asset name", { status: 400 });
+              }
+
+              const manifest = await getManifest();
+              const file = manifest.files[filename];
+              if (!file) return new Response("Asset not found: " + filename, { status: 404 });
+
+              const parts = [];
+              for (const chunk of file.chunks) {
+                const response = await fetch(RAW_ROOT + chunk);
+                if (!response.ok) throw new Error("Chunk fetch failed (" + response.status + "): " + chunk);
+                parts.push(await response.arrayBuffer());
+              }
+
+              const type = filename.includes("framework.js") ? "application/javascript" :
+                filename.endsWith(".wasm.unityweb") ? "application/wasm" : "application/octet-stream";
+              return new Response(new Blob(parts, { type }), {
+                status: 200,
+                headers: {
+                  "Content-Type": type,
+                  "Content-Length": String(file.size),
+                  "Cache-Control": "public, max-age=31536000, immutable"
+                }
+              });
+            })().catch(error => new Response("Asset proxy error: " + error.message, {
+              status: 502,
+              headers: { "Content-Type": "text/plain; charset=utf-8" }
+            })));
+          });
+          SW
+
+          git add index.html StreamingAssets/aa/catalog.json service-worker.js
+          git commit -m "Load Unity assets through CORS-enabled raw GitHub host"
+          git push origin main
