@@ -124,14 +124,18 @@ jobs:
           new_base = base
           for filename in ("WebGL.data.unityweb", "WebGL.framework.js.unityweb", "WebGL.wasm.unityweb"):
               old = old_base + filename
-              if old not in html:
+              proxy = new_base + filename
+              if old in html:
+                  html = html.replace(old, proxy)
+              elif proxy not in html:
                   raise SystemExit(f"Expected runtime URL not found in index.html: {filename}")
-              html = html.replace(old, new_base + filename)
 
           loader_assignment = 'var loaderUrl = buildUrl + "/WebGL.loader.js";'
-          if loader_assignment not in html:
-              raise SystemExit("Expected local Unity loader URL not found in index.html")
-          html = html.replace(loader_assignment, 'var loaderUrl = "' + base + 'WebGL.loader.js";', 1)
+          loader_proxy = 'var loaderUrl = "' + base + 'WebGL.loader.js";'
+          if loader_assignment in html:
+              html = html.replace(loader_assignment, loader_proxy, 1)
+          elif loader_proxy not in html:
+              raise SystemExit("Expected local or proxy Unity loader URL not found in index.html")
 
           if "async function loadUnityGame()" not in html:
               html = html.replace("function loadUnityGame() {", "async function loadUnityGame() {")
