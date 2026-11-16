@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ULTRAKILL asset connection test</title>
+<style>body{font:16px system-ui;background:#111;color:#eee;padding:24px}pre{white-space:pre-wrap;background:#222;padding:16px;border-radius:8px}</style>
+<h2>ULTRAKILL asset connection test</h2>
+<p>This checks whether the browser can fetch the Unity runtime from GitHub Releases (not merely download it as a file).</p>
+<pre id="out">Testing…</pre>
+<script>
+const out=document.getElementById('out');
+const urls=[
+'https://github.com/everyonesim/ultraport/releases/download/webgl-assets-v1/WebGL.framework.js.unityweb',
+'https://github.com/everyonesim/ultraport/releases/download/webgl-assets-v1/WebGL.data.unityweb'
+];
+(async()=>{
+ let lines=[];
+ for(const url of urls){
+  try{
+   const r=await fetch(url,{method:'GET',mode:'cors'});
+   lines.push(url.split('/').pop()+': FETCH OK; HTTP '+r.status+'; type='+r.type+'; content-length='+(r.headers.get('content-length')||'not exposed'));
+   if(url.includes('framework')){const b=await r.arrayBuffer();lines.push('Framework bytes read: '+b.byteLength);}
+   else {lines.push('Data response headers received; not downloading the full data file again.'); await r.body?.cancel();}
+  }catch(e){lines.push(url.split('/').pop()+': FETCH FAILED — '+e.name+': '+e.message);}
+  out.textContent=lines.join('\n');
+ }
+})().catch(e=>out.textContent='Test error: '+e);
+</script>
