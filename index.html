@@ -48,7 +48,7 @@
       var buildUrl = "Build";
       var loaderUrl = "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.loader.js";
       var config = {
-        dataUrl: "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.data.unityweb?v=2",
+        dataUrl: "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.data.unityweb?v=3",
         frameworkUrl: "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.framework.js.unityweb",
         codeUrl: "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.wasm.unityweb",
         streamingAssetsUrl: "StreamingAssets",
@@ -59,6 +59,10 @@
         autoSyncPersistentDataPath: true,
         devicePixelRatio: 1,
         cacheControl: function(url) {
+          // The data file changes whenever the build itself is patched, so it must
+          // never be treated as permanently cacheable. Bundles and the wasm pair
+          // only change with a full rebuild, which republishes the manifest.
+          if (/WebGL\.data\.unityweb/i.test(url)) return "no-store";
           if (/\.unityweb|\.bundle|\.wasm/i.test(url)) return "immutable";
           return "no-store";
         }
@@ -215,15 +219,25 @@ async function prepareAssetWorker() {
   if (!("serviceWorker" in navigator)) throw new Error("This browser does not support service workers.");
   await navigator.serviceWorker.register("service-worker.js");
   await navigator.serviceWorker.ready;
-  if (!navigator.serviceWorker.controller) {
-    await new Promise(function(resolve, reject) {
-      var timer = setTimeout(function() {
-        reject(new Error("The asset worker did not take control. Please reload and try again."));
-      }, 20000);
-      navigator.serviceWorker.addEventListener("controllerchange", function() {
+  // The worker can take control either just before or just after this point, so
+  // poll for the controller as well as listening for controllerchange. Waiting on
+  // the event alone could miss it and stall the load at 0%.
+  var deadline = Date.now() + 20000;
+  while (!navigator.serviceWorker.controller) {
+    if (Date.now() > deadline) {
+      throw new Error("The asset worker did not take control. Please reload and try again.");
+    }
+    await new Promise(function(resolve) {
+      var settled = false;
+      function finish() {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
+        navigator.serviceWorker.removeEventListener("controllerchange", finish);
         resolve();
-      }, { once: true });
+      }
+      var timer = setTimeout(finish, 200);
+      navigator.serviceWorker.addEventListener("controllerchange", finish);
     });
   }
 }
