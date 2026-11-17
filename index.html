@@ -93,18 +93,21 @@
       }, true);
 
       // ------------------------------------------------------------------
-      // Mouse capture. The game owns Cursor.lockState: it locks while you are
-      // playing and releases while a menu is open. Unity turns that into
-      // requestPointerLock()/exitPointerLock() calls, so mirror those instead
-      // of grabbing the pointer on every click. Capturing only during gameplay
-      // both keeps menus usable and gives the game real mouse deltas instead
-      // of a position that clamps against the edge of the window.
+      // Mouse capture. Locking the pointer is what gives the game real mouse
+      // deltas instead of a position that clamps against the window edge, but a
+      // locked pointer also hides the cursor, so it must only happen while you
+      // are actually playing. Two things decide that here:
+      //   * the game asking through Unity's Cursor.lockState, and
+      //   * the game hiding its cursor (style.cursor = "none"), which it only
+      //     does in mouse-look gameplay. A visible game cursor means a menu.
+      // Menus always get the cursor back and are never captured.
       // ------------------------------------------------------------------
       var nativeRequestPointerLock = Element.prototype.requestPointerLock;
       var nativeExitPointerLock = Document.prototype.exitPointerLock;
       var pointerLockWanted = false;
       var lockNeedsGesture = false;
-      var busyRewritingCursor = false;
+      var lastAttempt = 0;
+      var ourCursorWrite = null;
 
       function pointerIsLocked() {
         return document.pointerLockElement === canvas;
@@ -115,66 +118,97 @@
         hint.style.display = (!pointerIsLocked() && lockNeedsGesture) ? "block" : "none";
       }
 
-      // While locked the browser hides the cursor for us. If we are not locked
-      // the game still asks for a hidden cursor, which strands an invisible
-      // pointer in the UI, so keep it visible whenever we are not captured.
-      function keepCursorVisible() {
-        if (busyRewritingCursor || pointerIsLocked()) return;
-        if (canvas.style.cursor === "none") {
-          busyRewritingCursor = true;
-          canvas.style.cursor = "default";
-          busyRewritingCursor = false;
-        }
-      }
-      if (window.MutationObserver) {
-        new MutationObserver(function() {
-          keepCursorVisible();
-        }).observe(canvas, { attributes: true, attributeFilter: ["style"] });
+      function releasePointer() {
+        if (pointerIsLocked()) nativeExitPointerLock.call(document);
       }
 
+      // Attempt the capture, always handing back a promise so a caller that
+      // awaits Unity's requestPointerLock() keeps working.
       function attemptPointerLock() {
-        if (pointerIsLocked()) return;
+        if (pointerIsLocked()) return Promise.resolve();
+        lastAttempt = Date.now();
         var request;
         try {
           request = nativeRequestPointerLock.call(canvas);
         } catch (err) {
-          lockNeedsGesture = true;
-          updateHint();
-          return;
-        }
-        if (request && typeof request.then === "function") {
-          request.then(function() {
-            lockNeedsGesture = false;
-            updateHint();
-          }, function() {
-            // Browsers only allow this inside a real input event. Retry the
-            // moment the player touches the canvas again.
+          if (pointerLockWanted) {
             lockNeedsGesture = true;
             updateHint();
-          });
-        } else if (!pointerIsLocked()) {
-          lockNeedsGesture = true;
-          updateHint();
+          }
+          return Promise.reject(err);
         }
+        var pending = (request && typeof request.then === "function") ? request : null;
+        if (!pending) {
+          pending = new Promise(function(resolve, reject) {
+            var settled = false;
+            function check() {
+              if (settled) return;
+              settled = true;
+              if (pointerIsLocked()) resolve();
+              else reject(new Error("pointer lock was refused"));
+            }
+            document.addEventListener("pointerlockchange", check);
+            document.addEventListener("pointerlockerror", check);
+            setTimeout(check, 500);
+          });
+        }
+        return pending.then(function() {
+          lockNeedsGesture = false;
+          updateHint();
+        }, function(err) {
+          // Browsers only grant this inside an input event, so remember that the
+          // capture is still owed and retry on the next click or key press.
+          if (pointerLockWanted && !pointerIsLocked()) {
+            lockNeedsGesture = true;
+            updateHint();
+          }
+          throw err;
+        });
       }
 
       Element.prototype.requestPointerLock = function(options) {
         if (this !== canvas) return nativeRequestPointerLock.apply(this, arguments);
         pointerLockWanted = true;
-        attemptPointerLock();
+        return attemptPointerLock().catch(function() {});
       };
 
       Document.prototype.exitPointerLock = function() {
         pointerLockWanted = false;
         lockNeedsGesture = false;
         var result = nativeExitPointerLock.apply(this, arguments);
-        keepCursorVisible();
         updateHint();
         return result;
       };
 
+      // The game's own cursor state is the gameplay signal: hidden cursor means
+      // it wants mouse look, anything else means a menu or HUD.
+      function syncWithGameCursor() {
+        var current = canvas.style.cursor;
+        if (ourCursorWrite !== null) {
+          var wasOurs = current === ourCursorWrite;
+          ourCursorWrite = null;
+          if (wasOurs) return;
+        }
+        if (current === "none") {
+          pointerLockWanted = true;
+          if (!pointerIsLocked() && Date.now() - lastAttempt > 400) {
+            attemptPointerLock().catch(function() {});
+          }
+        } else {
+          pointerLockWanted = false;
+          lockNeedsGesture = false;
+          releasePointer();
+        }
+        updateHint();
+      }
+      if (window.MutationObserver) {
+        new MutationObserver(syncWithGameCursor)
+          .observe(canvas, { attributes: true, attributeFilter: ["style"] });
+      }
+
       function retryLockOnGesture() {
-        if (pointerLockWanted && !pointerIsLocked()) attemptPointerLock();
+        if (!pointerLockWanted || pointerIsLocked()) return;
+        attemptPointerLock().catch(function() {});
       }
       canvas.addEventListener("pointerdown", function() {
         canvas.focus();
@@ -184,19 +218,15 @@
       document.addEventListener("keydown", retryLockOnGesture, true);
 
       document.addEventListener("pointerlockchange", function() {
-        if (pointerIsLocked()) {
-          lockNeedsGesture = false;
-        } else {
-          // Menu, pause screen or Esc: hand the cursor straight back.
-          pointerLockWanted = false;
-          keepCursorVisible();
-        }
+        if (pointerIsLocked()) lockNeedsGesture = false;
         updateHint();
       }, false);
 
       document.addEventListener("pointerlockerror", function() {
-        lockNeedsGesture = true;
-        updateHint();
+        if (pointerLockWanted && !pointerIsLocked()) {
+          lockNeedsGesture = true;
+          updateHint();
+        }
       }, false);
 
       var booted = false;
