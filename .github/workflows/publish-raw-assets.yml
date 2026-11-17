@@ -256,5 +256,9 @@ jobs:
           SW
 
           git add index.html StreamingAssets/aa/catalog.json service-worker.js
-          git commit -m "Load Unity assets through CORS-enabled raw GitHub host"
+          if ! git diff --cached --quiet; then
+            git commit -m "Load Unity assets through CORS-enabled raw GitHub host"
+          else
+            echo "Game files already contain the asset proxy changes; nothing to commit."
+          fi
           git push origin main
