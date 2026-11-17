@@ -37,7 +37,7 @@ self.addEventListener("fetch", event => {
       parts.push(await response.arrayBuffer());
     }
 
-    const type = filename.includes("framework.js") ? "application/javascript" :
+    const type = filename.endsWith(".loader.js") || filename.includes("framework.js") ? "application/javascript" :
       filename.endsWith(".wasm.unityweb") ? "application/wasm" : "application/octet-stream";
     return new Response(new Blob(parts, { type }), {
       status: 200,
