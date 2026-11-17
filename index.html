@@ -37,7 +37,7 @@
           <div id="unity-progress-bar-full"></div>
         </div>
       </div>
-      <div id="lock-hint">click to lock mouse</div>
+      <div id="lock-hint">click to look around</div>
     </div>
     <script>
       var container = document.querySelector("#unity-container");
@@ -48,7 +48,7 @@
       var buildUrl = "Build";
       var loaderUrl = "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.loader.js";
       var config = {
-        dataUrl: "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.data.unityweb",
+        dataUrl: "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.data.unityweb?v=2",
         frameworkUrl: "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.framework.js.unityweb",
         codeUrl: "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.wasm.unityweb",
         streamingAssetsUrl: "StreamingAssets",
@@ -84,33 +84,117 @@
         e.preventDefault();
         e.stopPropagation();
       }, true);
-      function lockMouse() {
-        if (document.pointerLockElement === canvas) return;
-        canvas.focus();
-        try {
-          var p = canvas.requestPointerLock({
-            unadjustedMovement: true
-          });
-          if (p && p.catch) p.catch(function() {
-            canvas.requestPointerLock();
-          });
-        } catch (err) {
-          try {
-            canvas.requestPointerLock();
-          } catch (e) {}
-        }
-      }
-      canvas.addEventListener("click", lockMouse);
-      canvas.addEventListener("mousedown", lockMouse);
-      document.addEventListener("pointerlockchange", function() {
-        hint.style.display = document.pointerLockElement === canvas ? "none" : "block";
-      });
-      document.addEventListener("pointerlockerror", function() {
-        hint.style.display = "block";
-      });
       canvas.addEventListener("contextmenu", function(e) {
         e.preventDefault();
       }, true);
+
+      // ------------------------------------------------------------------
+      // Mouse capture. The game owns Cursor.lockState: it locks while you are
+      // playing and releases while a menu is open. Unity turns that into
+      // requestPointerLock()/exitPointerLock() calls, so mirror those instead
+      // of grabbing the pointer on every click. Capturing only during gameplay
+      // both keeps menus usable and gives the game real mouse deltas instead
+      // of a position that clamps against the edge of the window.
+      // ------------------------------------------------------------------
+      var nativeRequestPointerLock = Element.prototype.requestPointerLock;
+      var nativeExitPointerLock = Document.prototype.exitPointerLock;
+      var pointerLockWanted = false;
+      var lockNeedsGesture = false;
+      var busyRewritingCursor = false;
+
+      function pointerIsLocked() {
+        return document.pointerLockElement === canvas;
+      }
+
+      function updateHint() {
+        if (!hint) return;
+        hint.style.display = (!pointerIsLocked() && lockNeedsGesture) ? "block" : "none";
+      }
+
+      // While locked the browser hides the cursor for us. If we are not locked
+      // the game still asks for a hidden cursor, which strands an invisible
+      // pointer in the UI, so keep it visible whenever we are not captured.
+      function keepCursorVisible() {
+        if (busyRewritingCursor || pointerIsLocked()) return;
+        if (canvas.style.cursor === "none") {
+          busyRewritingCursor = true;
+          canvas.style.cursor = "default";
+          busyRewritingCursor = false;
+        }
+      }
+      if (window.MutationObserver) {
+        new MutationObserver(function() {
+          keepCursorVisible();
+        }).observe(canvas, { attributes: true, attributeFilter: ["style"] });
+      }
+
+      function attemptPointerLock() {
+        if (pointerIsLocked()) return;
+        var request;
+        try {
+          request = nativeRequestPointerLock.call(canvas);
+        } catch (err) {
+          lockNeedsGesture = true;
+          updateHint();
+          return;
+        }
+        if (request && typeof request.then === "function") {
+          request.then(function() {
+            lockNeedsGesture = false;
+            updateHint();
+          }, function() {
+            // Browsers only allow this inside a real input event. Retry the
+            // moment the player touches the canvas again.
+            lockNeedsGesture = true;
+            updateHint();
+          });
+        } else if (!pointerIsLocked()) {
+          lockNeedsGesture = true;
+          updateHint();
+        }
+      }
+
+      Element.prototype.requestPointerLock = function(options) {
+        if (this !== canvas) return nativeRequestPointerLock.apply(this, arguments);
+        pointerLockWanted = true;
+        attemptPointerLock();
+      };
+
+      Document.prototype.exitPointerLock = function() {
+        pointerLockWanted = false;
+        lockNeedsGesture = false;
+        var result = nativeExitPointerLock.apply(this, arguments);
+        keepCursorVisible();
+        updateHint();
+        return result;
+      };
+
+      function retryLockOnGesture() {
+        if (pointerLockWanted && !pointerIsLocked()) attemptPointerLock();
+      }
+      canvas.addEventListener("pointerdown", function() {
+        canvas.focus();
+        retryLockOnGesture();
+      });
+      canvas.addEventListener("mousedown", retryLockOnGesture);
+      document.addEventListener("keydown", retryLockOnGesture, true);
+
+      document.addEventListener("pointerlockchange", function() {
+        if (pointerIsLocked()) {
+          lockNeedsGesture = false;
+        } else {
+          // Menu, pause screen or Esc: hand the cursor straight back.
+          pointerLockWanted = false;
+          keepCursorVisible();
+        }
+        updateHint();
+      }, false);
+
+      document.addEventListener("pointerlockerror", function() {
+        lockNeedsGesture = true;
+        updateHint();
+      }, false);
+
       var booted = false;
       var started = false;
       function startGame() {
@@ -167,7 +251,7 @@ async function prepareAssetWorker() {
             progressBarFull.style.width = 100 * progress + "%";
           }).then(function(unityInstance) {
             loadingBar.style.display = "none";
-            hint.style.display = "block";
+            updateHint();
             unityInstance.SetFullscreen = function() {
               return 0;
             };
