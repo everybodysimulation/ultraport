@@ -134,7 +134,7 @@ jobs:
 
           # Always normalize the loader URL, whether this is the first run or a rerun.
           html, loader_count = re.subn(
-              r'var loaderUrl\\s*=\\s*[^;]+;',
+              r'var loaderUrl\s*=\s*[^;]+;',
               'var loaderUrl = "' + base + 'WebGL.loader.js";',
               html,
               count=1
@@ -143,7 +143,7 @@ jobs:
               raise SystemExit("Could not locate the Unity loader URL assignment")
 
           # Ensure loadUnityGame is async before inserting the worker wait.
-          html = re.sub(r'(?<!async )function loadUnityGame\\s*\\(',
+          html = re.sub(r'(?<!async )function loadUnityGame\s*\(',
                         'async function loadUnityGame(', html, count=1)
           if "async function loadUnityGame(" not in html:
               raise SystemExit("Could not locate loadUnityGame()")
@@ -168,7 +168,7 @@ jobs:
             }
           }
           """
-              html = html.replace("async function loadUnityGame(", helper + "\\n      async function loadUnityGame(", 1)
+              html = html.replace("async function loadUnityGame(", helper + "\n      async function loadUnityGame(", 1)
 
           # Insert the wait only if it is not already inside the loader function.
           if "await prepareAssetWorker();" not in html:
