@@ -47,6 +47,21 @@
     <script>
       var container = document.querySelector("#unity-container");
       var canvas = document.querySelector("#unity-canvas");
+
+      // The canvas shipped with a fixed 960x600 drawing buffer while CSS stretches
+      // it to the whole window, so everything Unity draws (splash logo included)
+      // was scaled to 16:10 and looked stretched on any other aspect. Keep the
+      // buffer equal to the displayed size instead, before the engine starts.
+      function fitCanvasToDisplay() {
+        var width = Math.max(1, Math.round(canvas.clientWidth || window.innerWidth));
+        var height = Math.max(1, Math.round(canvas.clientHeight || window.innerHeight));
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
+        }
+      }
+      fitCanvasToDisplay();
+      window.addEventListener("resize", fitCanvasToDisplay);
       var loadingBar = document.querySelector("#unity-loading-bar");
       var progressBarFull = document.querySelector("#unity-progress-bar-full");
       var hint = document.querySelector("#lock-hint");
@@ -60,7 +75,7 @@
         companyName: "Hakita",
         productName: "ULTRAKILL",
         productVersion: "4.1",
-        matchWebGLToCanvasSize: false,
+        matchWebGLToCanvasSize: true,
         autoSyncPersistentDataPath: true,
         devicePixelRatio: 1,
         cacheControl: function(url) {
