@@ -180,6 +180,15 @@ async function prepareAssetWorker() {
             m.textContent = message;
           });
         };
+        script.onerror = function() {
+          var m = loadingBar.querySelector("p");
+          if (!m) {
+            m = document.createElement("p");
+            loadingBar.appendChild(m);
+          }
+          m.textContent = "Could not load Unity loader script. Check the asset proxy.";
+          booted = false;
+        };
         document.body.appendChild(script);
       }
     </script>
