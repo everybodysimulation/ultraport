@@ -113,26 +113,26 @@
       }, true);
 
       // ------------------------------------------------------------------
-      // Mouse capture. Unity WebGL has no pointer-lock support in this build
-      // (the framework only defines JS_Cursor_SetShow), so the game never asks
-      // for the lock and its mouse look is driven by the cursor position, which
-      // is why turning stops once the pointer reaches a screen edge. The only
-      // way to get unbounded look is to actually capture the pointer, so the
-      // shell owns that:
-      //   * gameplay is detected from the game hiding its cursor (it hides it
-      //     while you play) or from gameplay input,
-      //   * while gameplay is suspected a watchdog keeps retrying the capture,
-      //     because browsers only grant it from a real input event,
-      //   * Esc or the game showing a cursor drops the capture and gives the
-      //     cursor back, so UI and menus are never captured.
+      // Mouse capture. Unlimited look needs a real pointer capture: the game's
+      // look follows the cursor, which stops moving at a screen edge. This build
+      // has no pointer-lock glue of its own, so the shell owns the capture and
+      // reads the game's cursor to tell play from menus:
+      //   * "none" or a custom cursor image (url(...)) - the game is drawing its
+      //     own crosshair - means play: capture.
+      //   * a plain cursor means a menu: release, and leave clicks alone.
+      // A click always captures unless the game says menu, and a long idle while
+      // captured releases it too, so a menu can never trap the pointer.
       // ------------------------------------------------------------------
       var nativeRequestPointerLock = Element.prototype.requestPointerLock;
       var nativeExitPointerLock = Document.prototype.exitPointerLock;
       var pointerLockWanted = false;
       var lockNeedsGesture = false;
       var lastAttempt = 0;
+      var lastActivity = Date.now();
       var watchdog = null;
-      var gameplayKeyHeld = false;
+      var gameState = "unknown";   // "play" | "menu" | "unknown"
+      var cursorSettle = null;
+      var IDLE_RELEASE_MS = 2500;
       var GAMEPLAY_KEY = /^(w|a|s|d|q|e|r|f|c|v|shift|control|space)$/i;
 
       function pointerIsLocked() {
@@ -155,6 +155,10 @@
           clearInterval(watchdog);
           watchdog = null;
         }
+      }
+
+      function noteActivity() {
+        lastActivity = Date.now();
       }
 
       function attemptPointerLock() {
@@ -187,12 +191,12 @@
         }
         return pending.then(function() {
           lockNeedsGesture = false;
-          stopWatchdog();
+          noteActivity();
           updateCursor();
           updateHint();
         }, function(err) {
-          // Browsers only grant the capture from a real input event. Keep the
-          // request pending and retry on the next input and on the watchdog.
+          // Browsers only grant the capture from a real input event. Retry on the
+          // next input and on the watchdog instead of losing it silently.
           if (pointerLockWanted && !pointerIsLocked()) {
             lockNeedsGesture = true;
             updateHint();
@@ -201,16 +205,20 @@
         });
       }
 
-      // Chromium only grants a capture from inside an input event, so retry from
-      // every input while gameplay is suspected, plus on a timer so a capture is
-      // never lost to a swallowed or missed event.
       function wantCapture() {
         pointerLockWanted = true;
+        noteActivity();
         attemptPointerLock().catch(function() {});
         if (watchdog === null) {
           watchdog = setInterval(function() {
-            if (!pointerLockWanted || pointerIsLocked()) {
+            if (!pointerLockWanted) {
               stopWatchdog();
+              return;
+            }
+            if (pointerIsLocked()) {
+              // A menu that cannot tell us it is a menu still gets the pointer
+              // back: an idle captured pointer is released after a pause.
+              if (Date.now() - lastActivity > IDLE_RELEASE_MS) releaseCapture();
               return;
             }
             if (Date.now() - lastAttempt < 350) return;
@@ -230,8 +238,7 @@
 
       Element.prototype.requestPointerLock = function(options) {
         if (this !== canvas) return nativeRequestPointerLock.apply(this, arguments);
-        pointerLockWanted = true;
-        return attemptPointerLock().catch(function() {});
+        return wantCapture();
       };
 
       Document.prototype.exitPointerLock = function() {
@@ -240,22 +247,35 @@
         return result;
       };
 
-      // The game hides its cursor while you play and shows it in UI, so its own
-      // cursor state is the gameplay signal.
-      function syncWithGameCursor() {
-        if (canvas.style.cursor === "none") {
-          wantCapture();
-        } else {
-          releaseCapture();
-        }
-        updateCursor();
+      // Classify the game's cursor once it settles, so a value that flickers
+      // between frames cannot flip the state every frame.
+      function readGameCursorState() {
+        var value = canvas.style.cursor || "";
+        if (cursorSettle !== null) clearTimeout(cursorSettle);
+        cursorSettle = setTimeout(function() {
+          cursorSettle = null;
+          var hidden = value === "none";
+          var custom = value.indexOf("url(") === 0;
+          if (hidden || custom) {
+            if (gameState !== "play") {
+              gameState = "play";
+              wantCapture();
+            }
+          } else if (value !== "") {
+            if (gameState !== "menu") {
+              gameState = "menu";
+              releaseCapture();
+            }
+          }
+        }, 180);
       }
       if (window.MutationObserver) {
-        new MutationObserver(syncWithGameCursor)
+        new MutationObserver(readGameCursorState)
           .observe(canvas, { attributes: true, attributeFilter: ["style"] });
       }
 
       function onGameplayInput() {
+        noteActivity();
         if (!pointerLockWanted) wantCapture();
         else attemptPointerLock().catch(function() {});
       }
@@ -263,39 +283,38 @@
       document.addEventListener("keydown", function(event) {
         if (event.metaKey || event.altKey) return;
         if (!GAMEPLAY_KEY.test(event.key || "")) return;
-        gameplayKeyHeld = true;
+        noteActivity();
         if (event.repeat || pointerIsLocked()) return;
         onGameplayInput();
       }, true);
-      document.addEventListener("keyup", function(event) {
-        if (GAMEPLAY_KEY.test(event.key || "")) gameplayKeyHeld = false;
-      }, true);
-      window.addEventListener("blur", function() {
-        gameplayKeyHeld = false;
-      });
 
-      // A click is the one gesture every browser reliably grants a capture from,
-      // so it always captures. Esc (or the game showing a cursor) hands the
-      // pointer straight back when a menu needs it.
+      // A click captures, except while the game is showing a menu cursor.
       canvas.addEventListener("pointerdown", function() {
         canvas.focus();
-        if (pointerIsLocked()) return;
+        noteActivity();
+        if (pointerIsLocked() || gameState === "menu") return;
         onGameplayInput();
       });
       canvas.addEventListener("mousedown", function() {
-        if (pointerIsLocked()) return;
+        noteActivity();
+        if (pointerIsLocked() || gameState === "menu") return;
         onGameplayInput();
+      });
+      // Moving the mouse only re-captures in play, so a menu cursor cannot be
+      // stolen back simply by moving over the canvas.
+      canvas.addEventListener("mousemove", function() {
+        noteActivity();
+        if (pointerIsLocked() || gameState !== "play" || !pointerLockWanted) return;
+        attemptPointerLock().catch(function() {});
       });
 
       document.addEventListener("pointerlockchange", function() {
         if (pointerIsLocked()) {
           lockNeedsGesture = false;
-          stopWatchdog();
+          noteActivity();
         } else {
-          // Esc or the game released it: do not steal the pointer back on a
-          // click until play resumes, and keep the cursor on screen.
+          // Esc or the game released it: hand the cursor back until play resumes.
           pointerLockWanted = false;
-          gameplayKeyHeld = false;
           stopWatchdog();
         }
         updateCursor();
@@ -312,7 +331,6 @@
       // The shell starts with a normal, visible cursor until play captures it.
       updateCursor();
       updateHint();
-
       var booted = false;
       var started = false;
       function startGame() {
