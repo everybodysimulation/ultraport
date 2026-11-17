@@ -130,19 +130,27 @@ jobs:
               elif proxy not in html:
                   raise SystemExit(f"Expected runtime URL not found in index.html: {filename}")
 
-          loader_assignment = 'var loaderUrl = buildUrl + "/WebGL.loader.js";'
-          loader_proxy = 'var loaderUrl = "' + base + 'WebGL.loader.js";'
-          if loader_assignment in html:
-              html = html.replace(loader_assignment, loader_proxy, 1)
-          elif loader_proxy not in html:
-              raise SystemExit("Expected local or proxy Unity loader URL not found in index.html")
+          import re
 
-          if "async function loadUnityGame()" not in html:
-              html = html.replace("function loadUnityGame() {", "async function loadUnityGame() {")
-          if "async function loadUnityGame()" not in html:
-              raise SystemExit("Could not make loadUnityGame async")
+          # Always normalize the loader URL, whether this is the first run or a rerun.
+          html, loader_count = re.subn(
+              r'var loaderUrl\\s*=\\s*[^;]+;',
+              'var loaderUrl = "' + base + 'WebGL.loader.js";',
+              html,
+              count=1
+          )
+          if loader_count != 1:
+              raise SystemExit("Could not locate the Unity loader URL assignment")
 
-          helper = """
+          # Ensure loadUnityGame is async before inserting the worker wait.
+          html = re.sub(r'(?<!async )function loadUnityGame\\s*\\(',
+                        'async function loadUnityGame(', html, count=1)
+          if "async function loadUnityGame(" not in html:
+              raise SystemExit("Could not locate loadUnityGame()")
+
+          # Add the worker helper only if absent.
+          if "async function prepareAssetWorker()" not in html:
+              helper = """
           async function prepareAssetWorker() {
             if (!("serviceWorker" in navigator)) throw new Error("This browser does not support service workers.");
             await navigator.serviceWorker.register("service-worker.js");
@@ -160,30 +168,27 @@ jobs:
             }
           }
           """
-          if "async function prepareAssetWorker()" not in html:
-              marker = "async function loadUnityGame() {"
-              html = html.replace(marker, helper + "\n      " + marker, 1)
+              html = html.replace("async function loadUnityGame(", helper + "\\n      async function loadUnityGame(", 1)
 
-          old_start = "\n".join(["        loadingBar.style.display = \"block\";", "        var script = document.createElement(\"script\");"])
-          new_start = "\n".join([
-              "        loadingBar.style.display = \"block\";",
-              "        try {",
-              "          await prepareAssetWorker();",
-              "        } catch (err) {",
-              "          var errorText = loadingBar.querySelector(\"p\");",
-              "          if (!errorText) {",
-              "            errorText = document.createElement(\"p\");",
-              "            loadingBar.appendChild(errorText);",
-              "          }",
-              "          errorText.textContent = \"Asset setup failed: \" + err.message;",
-              "          booted = false;",
-              "          return;",
-              "        }",
-              "        var script = document.createElement(\"script\");"
-          ])
-          if old_start not in html:
-              raise SystemExit("Could not find Unity loader insertion point in index.html")
-          html = html.replace(old_start, new_start, 1)
+          # Insert the wait only if it is not already inside the loader function.
+          if "await prepareAssetWorker();" not in html:
+              marker = '        loadingBar.style.display = "block";'
+              if marker not in html:
+                  raise SystemExit("Could not locate loading bar setup in loadUnityGame()")
+              insertion = marker + """
+                  try {
+                    await prepareAssetWorker();
+                  } catch (err) {
+                    var errorText = loadingBar.querySelector("p");
+                    if (!errorText) {
+                      errorText = document.createElement("p");
+                      loadingBar.appendChild(errorText);
+                    }
+                    errorText.textContent = "Asset setup failed: " + err.message;
+                    booted = false;
+                    return;
+                  }"""
+              html = html.replace(marker, insertion, 1)
           index_path.write_text(html)
           print("Rewrote 80 catalog bundle IDs, 3 Unity runtime URLs, and the Unity loader URL.")
           PY
