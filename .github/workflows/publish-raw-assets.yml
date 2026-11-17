@@ -2,6 +2,11 @@ name: Publish raw GitHub-hosted ULTRAKILL assets
 
 on: [workflow_dispatch, push]
 
+# Only one publisher may replace asset-host at a time. New pushes cancel stale runs.
+concurrency:
+  group: publish-raw-assets
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -38,7 +43,7 @@ jobs:
           assets = stage / "assets"
           assets.mkdir(parents=True, exist_ok=True)
           manifest = {"files": {}}
-          chunk_size = 80 * 1024 * 1024
+          chunk_size = 45 * 1024 * 1024
 
           for src in sources:
               if not src.is_file() or src.stat().st_size == 0:
