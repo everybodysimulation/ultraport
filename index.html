@@ -29,7 +29,12 @@
         <button id="start-btn" class="btn" type="button">start game</button>
       </div>
     </div>
-    <div id="unity-container" class="unity-desktop">
+      <style>
+      /* Keeps the pointer usable whenever it is not captured, without writing to
+         the canvas style (the game owns that, and we read it for gameplay state). */
+      #unity-container.cursor-forced #unity-canvas { cursor: default !important; }
+    </style>
+  <div id="unity-container" class="unity-desktop">
       <canvas id="unity-canvas" width="960" height="600" tabindex="0"></canvas>
       <div id="unity-loading-bar">
         <div id="unity-logo"></div>
@@ -93,28 +98,27 @@
       }, true);
 
       // ------------------------------------------------------------------
-      // Mouse capture. The port gives the page no menu state of its own: it
-      // never asks for pointer lock (Unity WebGL's Cursor.lockState is a no-op
-      // here) and it keeps the CSS cursor visible, so gameplay has to be
-      // inferred. Two things mark gameplay:
-      //   * a gameplay key (WASD, jump, fire, interactions), and
-      //   * the game hiding its cursor, if it ever does (style.cursor = "none").
-      // Anything that releases the pointer - Esc, the game showing a cursor -
-      // disarms the click capture, so menu clicks stay menu clicks and the
-      // cursor stays free in UI. While disarmed a movement key re-arms it,
-      // which is what happens the instant play resumes.
+      // Mouse capture. Unity WebGL has no pointer-lock support in this build
+      // (the framework only defines JS_Cursor_SetShow), so the game never asks
+      // for the lock and its mouse look is driven by the cursor position, which
+      // is why turning stops once the pointer reaches a screen edge. The only
+      // way to get unbounded look is to actually capture the pointer, so the
+      // shell owns that:
+      //   * gameplay is detected from the game hiding its cursor (it hides it
+      //     while you play) or from gameplay input,
+      //   * while gameplay is suspected a watchdog keeps retrying the capture,
+      //     because browsers only grant it from a real input event,
+      //   * Esc or the game showing a cursor drops the capture and gives the
+      //     cursor back, so UI and menus are never captured.
       // ------------------------------------------------------------------
       var nativeRequestPointerLock = Element.prototype.requestPointerLock;
       var nativeExitPointerLock = Document.prototype.exitPointerLock;
       var pointerLockWanted = false;
-      var playArmed = false;
       var lockNeedsGesture = false;
       var lastAttempt = 0;
-      var ourCursorWrite = null;
-      var gameCursorHidden = false;
-      var cursorOverridden = false;
-      var GAMEPLAY_KEY = /^(w|a|s|d|q|e|r|f|c|v|shift|control|space)$/i;
+      var watchdog = null;
       var gameplayKeyHeld = false;
+      var GAMEPLAY_KEY = /^(w|a|s|d|q|e|r|f|c|v|shift|control|space)$/i;
 
       function pointerIsLocked() {
         return document.pointerLockElement === canvas;
@@ -125,32 +129,17 @@
         hint.style.display = (!pointerIsLocked() && lockNeedsGesture) ? "block" : "none";
       }
 
-      function writeCursor(value) {
-        ourCursorWrite = value;
-        canvas.style.cursor = value;
+      // Show a usable cursor whenever we are not captured, using a CSS rule so
+      // the game's own inline cursor state stays readable.
+      function updateCursor() {
+        container.classList.toggle("cursor-forced", !pointerIsLocked());
       }
 
-      // While captured the browser hides the cursor for us. Whenever we are not
-      // captured the cursor must be on screen, whatever the game asked for, so
-      // menus and UI always have a pointer you can see and use.
-      function showCursor() {
-        if (pointerIsLocked()) return;
-        if (canvas.style.cursor !== "none") return;
-        cursorOverridden = true;
-        writeCursor("default");
-      }
-
-      // Put the game's own cursor state back once it no longer matters, so its
-      // next cursor change still reads as a real change to us.
-      function restoreGameCursor() {
-        if (!cursorOverridden) return;
-        cursorOverridden = false;
-        writeCursor(gameCursorHidden ? "none" : "default");
-      }
-
-      function releasePointer() {
-        if (pointerIsLocked()) nativeExitPointerLock.call(document);
-        showCursor();
+      function stopWatchdog() {
+        if (watchdog !== null) {
+          clearInterval(watchdog);
+          watchdog = null;
+        }
       }
 
       function attemptPointerLock() {
@@ -182,78 +171,86 @@
           });
         }
         return pending.then(function() {
-          playArmed = true;
           lockNeedsGesture = false;
-          restoreGameCursor();
+          stopWatchdog();
+          updateCursor();
           updateHint();
         }, function(err) {
-          // Browsers only grant this from an input event. The next click or
-          // key press retries, so the capture is never silently lost.
+          // Browsers only grant the capture from a real input event. Keep the
+          // request pending and retry on the next input and on the watchdog.
           if (pointerLockWanted && !pointerIsLocked()) {
             lockNeedsGesture = true;
             updateHint();
-            showCursor();
           }
           throw err;
         });
       }
 
-      function armAndCapture() {
-        playArmed = true;
+      // Chromium only grants a capture from inside an input event, so retry from
+      // every input while gameplay is suspected, plus on a timer so a capture is
+      // never lost to a swallowed or missed event.
+      function wantCapture() {
         pointerLockWanted = true;
-        return attemptPointerLock().catch(function() {});
+        attemptPointerLock().catch(function() {});
+        if (watchdog === null) {
+          watchdog = setInterval(function() {
+            if (!pointerLockWanted || pointerIsLocked()) {
+              stopWatchdog();
+              return;
+            }
+            if (Date.now() - lastAttempt < 350) return;
+            attemptPointerLock().catch(function() {});
+          }, 400);
+        }
+      }
+
+      function releaseCapture() {
+        pointerLockWanted = false;
+        lockNeedsGesture = false;
+        stopWatchdog();
+        if (pointerIsLocked()) nativeExitPointerLock.call(document);
+        updateCursor();
+        updateHint();
       }
 
       Element.prototype.requestPointerLock = function(options) {
         if (this !== canvas) return nativeRequestPointerLock.apply(this, arguments);
-        return armAndCapture().catch(function() {});
+        pointerLockWanted = true;
+        return attemptPointerLock().catch(function() {});
       };
 
       Document.prototype.exitPointerLock = function() {
-        pointerLockWanted = false;
-        playArmed = false;
-        lockNeedsGesture = false;
         var result = nativeExitPointerLock.apply(this, arguments);
-        showCursor();
-        updateHint();
+        releaseCapture();
         return result;
       };
 
-      // The game's own cursor state, if it ever writes one: hidden cursor means
-      // it wants mouse look, a visible one means it wants the pointer back.
+      // The game hides its cursor while you play and shows it in UI, so its own
+      // cursor state is the gameplay signal.
       function syncWithGameCursor() {
-        var current = canvas.style.cursor;
-        if (ourCursorWrite !== null) {
-          var wasOurs = current === ourCursorWrite;
-          ourCursorWrite = null;
-          if (wasOurs) return;
-        }
-        gameCursorHidden = current === "none";
-        if (gameCursorHidden) {
-          armAndCapture();
-          if (!pointerIsLocked()) showCursor();
+        if (canvas.style.cursor === "none") {
+          wantCapture();
         } else {
-          pointerLockWanted = false;
-          playArmed = false;
-          gameplayKeyHeld = false;
-          lockNeedsGesture = false;
-          releasePointer();
+          releaseCapture();
         }
-        updateHint();
+        updateCursor();
       }
       if (window.MutationObserver) {
         new MutationObserver(syncWithGameCursor)
           .observe(canvas, { attributes: true, attributeFilter: ["style"] });
       }
 
-      // A gameplay key means the player is playing: re-arm and capture. This is
-      // also what gets the pointer back after Esc without stealing menu clicks.
+      function onGameplayInput() {
+        if (!pointerLockWanted) wantCapture();
+        else attemptPointerLock().catch(function() {});
+      }
+
       document.addEventListener("keydown", function(event) {
         if (event.metaKey || event.altKey) return;
         if (!GAMEPLAY_KEY.test(event.key || "")) return;
         gameplayKeyHeld = true;
         if (event.repeat || pointerIsLocked()) return;
-        armAndCapture();
+        onGameplayInput();
       }, true);
       document.addEventListener("keyup", function(event) {
         if (GAMEPLAY_KEY.test(event.key || "")) gameplayKeyHeld = false;
@@ -262,36 +259,43 @@
         gameplayKeyHeld = false;
       });
 
-      // Clicks only capture once play is armed, so menu buttons stay clickable.
-      // Firing while moving counts as play, which covers starting a run without
-      // touching a movement key first.
-      canvas.addEventListener("pointerdown", function(event) {
+      canvas.addEventListener("pointerdown", function() {
         canvas.focus();
         if (pointerIsLocked()) return;
-        if (!playArmed && !gameplayKeyHeld) return;
-        attemptPointerLock().catch(function() {});
+        // A click in play re-captures; a click on a menu button does not, because
+        // any menu has already dropped the capture.
+        if (pointerLockWanted || gameplayKeyHeld) onGameplayInput();
+      });
+      canvas.addEventListener("mousedown", function() {
+        if (pointerIsLocked()) return;
+        if (pointerLockWanted || gameplayKeyHeld) onGameplayInput();
       });
 
       document.addEventListener("pointerlockchange", function() {
         if (pointerIsLocked()) {
-          playArmed = true;
           lockNeedsGesture = false;
+          stopWatchdog();
         } else {
-          // Esc, or the game releasing the pointer: back to free-cursor mode.
-          playArmed = false;
+          // Esc or the game released it: do not steal the pointer back on a
+          // click until play resumes, and keep the cursor on screen.
+          pointerLockWanted = false;
           gameplayKeyHeld = false;
-          showCursor();
+          stopWatchdog();
         }
+        updateCursor();
         updateHint();
       }, false);
 
       document.addEventListener("pointerlockerror", function() {
         if (pointerLockWanted && !pointerIsLocked()) {
           lockNeedsGesture = true;
-          showCursor();
           updateHint();
         }
       }, false);
+
+      // The shell starts with a normal, visible cursor until play captures it.
+      updateCursor();
+      updateHint();
 
       var booted = false;
       var started = false;
