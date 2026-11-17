@@ -113,222 +113,235 @@
       }, true);
 
       // ------------------------------------------------------------------
-      // Mouse capture. Unlimited look needs a real pointer capture: the game's
-      // look follows the cursor, which stops moving at a screen edge. This build
-      // has no pointer-lock glue of its own, so the shell owns the capture and
-      // reads the game's cursor to tell play from menus:
-      //   * "none" or a custom cursor image (url(...)) - the game is drawing its
-      //     own crosshair - means play: capture.
-      //   * a plain cursor means a menu: release, and leave clicks alone.
-      // A click always captures unless the game says menu, and a long idle while
-      // captured releases it too, so a menu can never trap the pointer.
+      // Mouse capture. The port never asks for the lock and never signals whether
+      // it is in a menu, so this shell owns the capture and drives it from input.
+      // Turning is unlimited only while the pointer is captured, so capture is
+      // attempted from every input the page can see, kept while playing, and
+      // released by Esc, a double click, or the release key when a menu needs the
+      // cursor back.
       // ------------------------------------------------------------------
-      var nativeRequestPointerLock = Element.prototype.requestPointerLock;
-      var nativeExitPointerLock = Document.prototype.exitPointerLock;
-      var pointerLockWanted = false;
-      var lockNeedsGesture = false;
+      var nativeRequestPointerLock = Element.prototype.requestPointerLock ||
+        Element.prototype.mozRequestPointerLock ||
+        Element.prototype.webkitRequestPointerLock ||
+        Element.prototype.msRequestPointerLock;
+      var nativeExitPointerLock = Document.prototype.exitPointerLock ||
+        Document.prototype.mozExitPointerLock ||
+        Document.prototype.webkitExitPointerLock ||
+        Document.prototype.msExitPointerLock;
+      var captureWanted = true;
+      var needsGesture = false;
       var lastAttempt = 0;
       var lastActivity = Date.now();
-      var watchdog = null;
-      var gameState = "unknown";   // "play" | "menu" | "unknown"
-      var cursorSettle = null;
-      var IDLE_RELEASE_MS = 2500;
-      var GAMEPLAY_KEY = /^(w|a|s|d|q|e|r|f|c|v|shift|control|space)$/i;
+      var idleWatch = null;
+      var IDLE_RELEASE_MS = 6000;
+      var RETRY_MS = 300;
+      var graceUntil = 0;
+
+      function lockedElement() {
+        return document.pointerLockElement ||
+          document.mozPointerLockElement ||
+          document.webkitPointerLockElement ||
+          document.msPointerLockElement ||
+          null;
+      }
 
       function pointerIsLocked() {
-        return document.pointerLockElement === canvas;
-      }
-
-      function updateHint() {
-        if (!hint) return;
-        hint.style.display = (!pointerIsLocked() && lockNeedsGesture) ? "block" : "none";
-      }
-
-      // Show a usable cursor whenever we are not captured, using a CSS rule so
-      // the game's own inline cursor state stays readable.
-      function updateCursor() {
-        container.classList.toggle("cursor-forced", !pointerIsLocked());
-      }
-
-      function stopWatchdog() {
-        if (watchdog !== null) {
-          clearInterval(watchdog);
-          watchdog = null;
-        }
+        return lockedElement() === canvas;
       }
 
       function noteActivity() {
         lastActivity = Date.now();
       }
 
-      function attemptPointerLock() {
-        if (pointerIsLocked()) return Promise.resolve();
-        lastAttempt = Date.now();
-        var request;
-        try {
-          request = nativeRequestPointerLock.call(canvas);
-        } catch (err) {
-          if (pointerLockWanted) {
-            lockNeedsGesture = true;
-            updateHint();
+      function updateHint() {
+        if (!hint) return;
+        hint.style.display = (needsGesture && !pointerIsLocked()) ? "block" : "none";
+      }
+
+      function updateCursor() {
+        if (!container) return;
+        container.classList.toggle("cursor-forced", !pointerIsLocked());
+      }
+
+      function startIdleWatch() {
+        if (idleWatch !== null) return;
+        idleWatch = setInterval(function() {
+          if (!pointerIsLocked()) {
+            clearInterval(idleWatch);
+            idleWatch = null;
+            return;
           }
+          if (Date.now() - lastActivity > IDLE_RELEASE_MS) releasePointer();
+        }, 500);
+      }
+
+      // Ask for the capture. Browsers only grant it from inside an input event, so
+      // a refusal is normal and is retried by the next input and by the watchdog.
+      function requestCapture(via) {
+        if (pointerIsLocked()) return Promise.resolve();
+        captureWanted = true;
+        lastAttempt = Date.now();
+        if (canvas.focus) {
+          try { canvas.focus({ preventScroll: true }); } catch (err) { canvas.focus(); }
+        }
+        var result;
+        try {
+          result = nativeRequestPointerLock.call(canvas);
+        } catch (err) {
+          needsGesture = true;
+          updateHint();
           return Promise.reject(err);
         }
-        var pending = (request && typeof request.then === "function") ? request : null;
+        var pending = (result && typeof result.then === "function") ? result : null;
         if (!pending) {
           pending = new Promise(function(resolve, reject) {
             var settled = false;
-            function check() {
+            function settle() {
               if (settled) return;
               settled = true;
               if (pointerIsLocked()) resolve();
-              else reject(new Error("pointer lock was refused"));
+              else reject(new Error("pointer lock refused"));
             }
-            document.addEventListener("pointerlockchange", check);
-            document.addEventListener("pointerlockerror", check);
-            setTimeout(check, 500);
+            document.addEventListener("pointerlockchange", settle);
+            document.addEventListener("pointerlockerror", settle);
+            setTimeout(settle, 400);
           });
         }
         return pending.then(function() {
-          lockNeedsGesture = false;
+          needsGesture = false;
           noteActivity();
+          startIdleWatch();
           updateCursor();
           updateHint();
         }, function(err) {
-          // Browsers only grant the capture from a real input event. Retry on the
-          // next input and on the watchdog instead of losing it silently.
-          if (pointerLockWanted && !pointerIsLocked()) {
-            lockNeedsGesture = true;
+          if (!pointerIsLocked()) {
+            needsGesture = true;
+            updateCursor();
             updateHint();
           }
           throw err;
         });
       }
 
-      function wantCapture() {
-        pointerLockWanted = true;
-        noteActivity();
-        attemptPointerLock().catch(function() {});
-        if (watchdog === null) {
-          watchdog = setInterval(function() {
-            if (!pointerLockWanted) {
-              stopWatchdog();
-              return;
-            }
-            if (pointerIsLocked()) {
-              // A menu that cannot tell us it is a menu still gets the pointer
-              // back: an idle captured pointer is released after a pause.
-              if (Date.now() - lastActivity > IDLE_RELEASE_MS) releaseCapture();
-              return;
-            }
-            if (Date.now() - lastAttempt < 350) return;
-            attemptPointerLock().catch(function() {});
-          }, 400);
-        }
+      function tryCapture() {
+        if (pointerIsLocked()) return;
+        if (Date.now() - lastAttempt < 120) return;
+        requestCapture("input").catch(function() {});
       }
 
-      function releaseCapture() {
-        pointerLockWanted = false;
-        lockNeedsGesture = false;
-        stopWatchdog();
-        if (pointerIsLocked()) nativeExitPointerLock.call(document);
+      function releasePointer() {
+        captureWanted = false;
+        needsGesture = false;
+        lastAttempt = 0;
+        graceUntil = Date.now() + 1500;
+        if (nativeExitPointerLock && pointerIsLocked()) {
+          try { nativeExitPointerLock.call(document); } catch (err) {}
+        }
         updateCursor();
         updateHint();
       }
 
+      // The game's own lock calls, if it ever makes them, keep working.
       Element.prototype.requestPointerLock = function(options) {
-        if (this !== canvas) return nativeRequestPointerLock.apply(this, arguments);
-        return wantCapture();
+        if (this === canvas) {
+          captureWanted = true;
+          return requestCapture("game").catch(function() {});
+        }
+        return nativeRequestPointerLock.apply(this, arguments);
       };
-
       Document.prototype.exitPointerLock = function() {
-        var result = nativeExitPointerLock.apply(this, arguments);
-        releaseCapture();
-        return result;
+        var out = nativeExitPointerLock.apply(this, arguments);
+        releasePointer();
+        return out;
       };
 
-      // Classify the game's cursor once it settles, so a value that flickers
-      // between frames cannot flip the state every frame.
-      function readGameCursorState() {
-        var value = canvas.style.cursor || "";
-        if (cursorSettle !== null) clearTimeout(cursorSettle);
-        cursorSettle = setTimeout(function() {
-          cursorSettle = null;
-          var hidden = value === "none";
-          var custom = value.indexOf("url(") === 0;
-          if (hidden || custom) {
-            if (gameState !== "play") {
-              gameState = "play";
-              wantCapture();
-            }
-          } else if (value !== "") {
-            if (gameState !== "menu") {
-              gameState = "menu";
-              releaseCapture();
-            }
-          }
-        }, 180);
-      }
-      if (window.MutationObserver) {
-        new MutationObserver(readGameCursorState)
-          .observe(canvas, { attributes: true, attributeFilter: ["style"] });
-      }
+      // Retry watch: while a capture is wanted and not held, keep asking on a
+      // timer, because any input in the meantime may have granted the gesture.
+      setInterval(function() {
+        if (!captureWanted || pointerIsLocked()) return;
+        if (Date.now() - lastAttempt < RETRY_MS) return;
+        requestCapture("watchdog").catch(function() {});
+      }, 400);
 
-      function onGameplayInput() {
+      // Every input the page can observe tries to capture.
+      function onInput(event) {
         noteActivity();
-        if (!pointerLockWanted) wantCapture();
-        else attemptPointerLock().catch(function() {});
+        if (event && event.metaKey) return;
+        if (event && event.key === "F8") return;   // toggle handles itself
+        // Aiming motion should not grab the pointer back the moment Esc handed it
+        // over; a click or a key still captures straight away.
+        if (event && (event.type === "mousemove" || event.type === "wheel")) {
+          if (Date.now() < graceUntil) return;
+        }
+        tryCapture();
       }
 
+      canvas.addEventListener("pointerdown", onInput, true);
+      canvas.addEventListener("mousedown", onInput, true);
+      canvas.addEventListener("click", onInput, true);
+      canvas.addEventListener("mousemove", onInput, true);
+      canvas.addEventListener("wheel", onInput, { capture: true, passive: true });
+      canvas.addEventListener("touchstart", onInput, true);
+      canvas.addEventListener("contextmenu", function(event) {
+        event.preventDefault();
+        onInput(event);
+      }, true);
       document.addEventListener("keydown", function(event) {
-        if (event.metaKey || event.altKey) return;
-        if (!GAMEPLAY_KEY.test(event.key || "")) return;
-        noteActivity();
-        if (event.repeat || pointerIsLocked()) return;
-        onGameplayInput();
+        if (event.metaKey || event.altKey || event.ctrlKey) return;
+        onInput(event);
       }, true);
 
-      // A click captures, except while the game is showing a menu cursor.
-      canvas.addEventListener("pointerdown", function() {
-        canvas.focus();
-        noteActivity();
-        if (pointerIsLocked() || gameState === "menu") return;
-        onGameplayInput();
-      });
-      canvas.addEventListener("mousedown", function() {
-        noteActivity();
-        if (pointerIsLocked() || gameState === "menu") return;
-        onGameplayInput();
-      });
-      // Moving the mouse only re-captures in play, so a menu cursor cannot be
-      // stolen back simply by moving over the canvas.
-      canvas.addEventListener("mousemove", function() {
-        noteActivity();
-        if (pointerIsLocked() || gameState !== "play" || !pointerLockWanted) return;
-        attemptPointerLock().catch(function() {});
-      });
+      // Double click frees the pointer so a menu can be used with the cursor.
+      canvas.addEventListener("dblclick", function(event) {
+        event.stopPropagation();
+        releasePointer();
+      }, true);
 
+      // F8 toggles the capture as a manual escape hatch.
+      document.addEventListener("keydown", function(event) {
+        if (event.key !== "F8") return;
+        event.preventDefault();
+        if (pointerIsLocked()) releasePointer();
+        else { captureWanted = true; requestCapture("toggle").catch(function() {}); }
+      }, true);
+
+      // Esc frees it natively; keep our state in step with whatever the browser did.
       document.addEventListener("pointerlockchange", function() {
+        noteActivity();
         if (pointerIsLocked()) {
-          lockNeedsGesture = false;
-          noteActivity();
-        } else {
-          // Esc or the game released it: hand the cursor back until play resumes.
-          pointerLockWanted = false;
-          stopWatchdog();
+          needsGesture = false;
+          startIdleWatch();
+        } else if (lockedElement() === null) {
+          // Released (Esc, double click, toggle): stay released until input, and
+          // give menu movement a moment before motion can grab it again.
+          captureWanted = false;
+          lastAttempt = 0;
+          graceUntil = Date.now() + 1500;
         }
         updateCursor();
         updateHint();
       }, false);
 
       document.addEventListener("pointerlockerror", function() {
-        if (pointerLockWanted && !pointerIsLocked()) {
-          lockNeedsGesture = true;
-          updateHint();
-        }
+        needsGesture = !pointerIsLocked();
+        updateCursor();
+        updateHint();
       }, false);
 
-      // The shell starts with a normal, visible cursor until play captures it.
+      // A capture that survives a tab switch is stale; drop it and re-arm.
+      window.addEventListener("blur", function(event) {
+        // Only the window losing focus matters: focusing the canvas blurs the
+        // element that had focus and must not drop the capture.
+        if (event.target !== window) return;
+        releasePointer();
+      });
+      document.addEventListener("visibilitychange", function() {
+        if (document.hidden) releasePointer();
+      });
+      window.addEventListener("focus", function() {
+        noteActivity();
+      });
+
       updateCursor();
       updateHint();
       var booted = false;
