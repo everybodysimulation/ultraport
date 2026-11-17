@@ -137,6 +137,10 @@
       var RETRY_MS = 300;
       var graceUntil = 0;
       var userEscaped = false;
+      // The port never tells us when it is in a menu, so play is entered by the
+      // player's own movement input and left whenever the cursor is handed back.
+      var playMode = false;
+      var MOVE_KEY = /^(w|a|s|d|arrowup|arrowdown|arrowleft|arrowright|shift|control| )$/i;
       var escapeTimer = null;
 
       function lockedElement() {
@@ -216,6 +220,7 @@
       }
 
       function tryCapture() {
+        if (!playMode) return;
         if (pointerIsLocked()) return;
         if (Date.now() - lastAttempt < 120) return;
         requestCapture("input").catch(function() {});
@@ -223,6 +228,7 @@
 
       function releasePointer() {
         captureWanted = false;
+        playMode = false;
         needsGesture = false;
         lastAttempt = 0;
         graceUntil = Date.now() + 1500;
@@ -253,7 +259,7 @@
       // Retry watch: while a capture is wanted and not held, keep asking on a
       // timer, because any input in the meantime may have granted the gesture.
       setInterval(function() {
-        if (!captureWanted || pointerIsLocked()) return;
+        if (!captureWanted || !playMode || pointerIsLocked()) return;
         if (Date.now() - lastAttempt < RETRY_MS) return;
         requestCapture("watchdog").catch(function() {});
       }, 400);
@@ -289,6 +295,11 @@
           if (escapeTimer !== null) clearTimeout(escapeTimer);
           escapeTimer = setTimeout(function() { userEscaped = false; }, 800);
         }
+        if (MOVE_KEY.test(event.key || "") && event.key !== "Control") {
+          playMode = true;
+        } else if (event.key === "Control" && !event.ctrlKey) {
+          playMode = true;
+        }
         if (event.metaKey || event.altKey || event.ctrlKey) return;
         onInput(event);
       }, true);
@@ -314,6 +325,7 @@
         if (userEscaped) {
           // The player wants the cursor: stay released until they give input.
           captureWanted = false;
+          playMode = false;
           lastAttempt = 0;
           graceUntil = Date.now() + 1500;
           updateCursor();
@@ -325,7 +337,7 @@
         captureWanted = true;
         lastAttempt = 0;
         setTimeout(function() {
-          if (!pointerIsLocked() && captureWanted) requestCapture("relock").catch(function() {});
+          if (!pointerIsLocked() && captureWanted && playMode) requestCapture("relock").catch(function() {});
         }, 30);
         updateCursor();
         updateHint();
@@ -350,6 +362,39 @@
       window.addEventListener("focus", function() {
         noteActivity();
       });
+
+      // Auto fullscreen on the first real interaction (browsers require a
+      // gesture). Silent when the browser refuses.
+      var fullscreenAsked = false;
+      function requestFullscreenOnce() {
+        if (fullscreenAsked || document.fullscreenElement || document.webkitFullscreenElement) return;
+        fullscreenAsked = true;
+        var target = container || document.documentElement;
+        var request = target.requestFullscreen || target.webkitRequestFullscreen || target.msRequestFullscreen;
+        if (!request) return;
+        try {
+          var out = request.call(target, { navigationUI: "hide" });
+          if (out && out.catch) out.catch(function() {});
+        } catch (err) {}
+      }
+      canvas.addEventListener("pointerdown", requestFullscreenOnce, true);
+      canvas.addEventListener("keydown", requestFullscreenOnce, true);
+      var startButton = document.getElementById("start-btn");
+      if (startButton) startButton.addEventListener("click", requestFullscreenOnce, false);
+      document.addEventListener("keydown", function(event) {
+        if (event.key === "F11") requestFullscreenOnce();
+      }, true);
+
+      // Keep the game's keyboard focused and stop Chrome from taking keys it uses
+      // for its own behaviour while playing.
+      document.addEventListener("keydown", function(event) {
+        if (!playMode) return;
+        var key = event.key || "";
+        if (key === "Tab" || key === " " || key === "Spacebar" || /^F([1-9]|1[0-2])$/.test(key)) {
+          event.preventDefault();
+        }
+        if (event.ctrlKey && /^[fgjkp]$/i.test(key)) event.preventDefault();
+      }, false);
 
       updateCursor();
       updateHint();
