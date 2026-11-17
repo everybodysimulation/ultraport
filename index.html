@@ -274,16 +274,17 @@
         gameplayKeyHeld = false;
       });
 
+      // A click is the one gesture every browser reliably grants a capture from,
+      // so it always captures. Esc (or the game showing a cursor) hands the
+      // pointer straight back when a menu needs it.
       canvas.addEventListener("pointerdown", function() {
         canvas.focus();
         if (pointerIsLocked()) return;
-        // A click in play re-captures; a click on a menu button does not, because
-        // any menu has already dropped the capture.
-        if (pointerLockWanted || gameplayKeyHeld) onGameplayInput();
+        onGameplayInput();
       });
       canvas.addEventListener("mousedown", function() {
         if (pointerIsLocked()) return;
-        if (pointerLockWanted || gameplayKeyHeld) onGameplayInput();
+        onGameplayInput();
       });
 
       document.addEventListener("pointerlockchange", function() {
