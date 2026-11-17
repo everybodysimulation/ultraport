@@ -136,6 +136,8 @@
       var IDLE_RELEASE_MS = 6000;
       var RETRY_MS = 300;
       var graceUntil = 0;
+      var userEscaped = false;
+      var escapeTimer = null;
 
       function lockedElement() {
         return document.pointerLockElement ||
@@ -280,6 +282,13 @@
         onInput(event);
       }, true);
       document.addEventListener("keydown", function(event) {
+        if (event.key === "Escape" || event.key === "Esc") {
+          // Only an Esc the player actually pressed may end the capture; any other
+          // unlock is the page or the browser dropping it and gets re-grabbed.
+          userEscaped = true;
+          if (escapeTimer !== null) clearTimeout(escapeTimer);
+          escapeTimer = setTimeout(function() { userEscaped = false; }, 800);
+        }
         if (event.metaKey || event.altKey || event.ctrlKey) return;
         onInput(event);
       }, true);
@@ -298,13 +307,26 @@
         if (pointerIsLocked()) {
           needsGesture = false;
           startIdleWatch();
-        } else if (lockedElement() === null) {
-          // Released (Esc, double click, toggle): stay released until input, and
-          // give menu movement a moment before motion can grab it again.
+          updateCursor();
+          updateHint();
+          return;
+        }
+        if (userEscaped) {
+          // The player wants the cursor: stay released until they give input.
           captureWanted = false;
           lastAttempt = 0;
           graceUntil = Date.now() + 1500;
+          updateCursor();
+          updateHint();
+          return;
         }
+        // Anything else dropped the capture without the player asking (the game
+        // shutting it off, the browser reclaiming it): take it straight back.
+        captureWanted = true;
+        lastAttempt = 0;
+        setTimeout(function() {
+          if (!pointerIsLocked() && captureWanted) requestCapture("relock").catch(function() {});
+        }, 30);
         updateCursor();
         updateHint();
       }, false);
