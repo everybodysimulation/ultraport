@@ -163,17 +163,7 @@
         container.classList.toggle("cursor-forced", !pointerIsLocked());
       }
 
-      function startIdleWatch() {
-        if (idleWatch !== null) return;
-        idleWatch = setInterval(function() {
-          if (!pointerIsLocked()) {
-            clearInterval(idleWatch);
-            idleWatch = null;
-            return;
-          }
-          if (Date.now() - lastActivity > IDLE_RELEASE_MS) releasePointer();
-        }, 500);
-      }
+      function startIdleWatch() {}
 
       // Ask for the capture. Browsers only grant it from inside an input event, so
       // a refusal is normal and is retried by the next input and by the watchdog.
@@ -250,8 +240,11 @@
         return nativeRequestPointerLock.apply(this, arguments);
       };
       Document.prototype.exitPointerLock = function() {
+        // Nothing in this port ever asks for the lock to end, and a frame-by-frame
+        // exit call from the game is exactly what kept dropping the capture, so
+        // the game cannot release it. Esc still exits natively.
+        if (captureWanted) return undefined;
         var out = nativeExitPointerLock.apply(this, arguments);
-        releasePointer();
         return out;
       };
 
@@ -289,12 +282,6 @@
       document.addEventListener("keydown", function(event) {
         if (event.metaKey || event.altKey || event.ctrlKey) return;
         onInput(event);
-      }, true);
-
-      // Double click frees the pointer so a menu can be used with the cursor.
-      canvas.addEventListener("dblclick", function(event) {
-        event.stopPropagation();
-        releasePointer();
       }, true);
 
       // F8 toggles the capture as a manual escape hatch.
