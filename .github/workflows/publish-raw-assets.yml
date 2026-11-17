@@ -2,10 +2,10 @@ name: Publish raw GitHub-hosted ULTRAKILL assets
 
 on: [workflow_dispatch, push]
 
-# Only one publisher may replace asset-host at a time. New pushes cancel stale runs.
+# Only one publisher may replace asset-host at a time. Queue newer runs; never cancel an active publish.
 concurrency:
   group: publish-raw-assets
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write
