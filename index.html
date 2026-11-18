@@ -65,6 +65,24 @@
       var loadingBar = document.querySelector("#unity-loading-bar");
       var progressBarFull = document.querySelector("#unity-progress-bar-full");
       var hint = document.querySelector("#lock-hint");
+      // Renderer path. A WebGL build can compile its particle and effect shaders
+      // correctly for one graphics API and badly for the other, which shows up as
+      // oversized particle quads and wrong textures. The path is switchable and
+      // remembered: ?gl=1 forces WebGL1, ?gl=2 forces WebGL2, ?aa=0 drops MSAA.
+      var params = new URLSearchParams(location.search);
+      var glChoice = params.get("gl");
+      if (glChoice === "1" || glChoice === "2") {
+        try { localStorage.setItem("ultraport-gl", glChoice); } catch (err) {}
+      } else {
+        try { glChoice = localStorage.getItem("ultraport-gl"); } catch (err) {}
+      }
+      if (glChoice === "1") {
+        var nativeGetContext = HTMLCanvasElement.prototype.getContext;
+        HTMLCanvasElement.prototype.getContext = function (type) {
+          if (type === "webgl2") return null;
+          return nativeGetContext.apply(this, arguments);
+        };
+      }
       var buildUrl = "Build";
       var loaderUrl = "https://everyonesim.github.io/ultraport/asset-proxy/WebGL.loader.js";
       var config = {
@@ -78,6 +96,16 @@
         matchWebGLToCanvasSize: true,
         autoSyncPersistentDataPath: true,
         devicePixelRatio: 1,
+        webglContextAttributes: {
+          alpha: false,
+          depth: true,
+          stencil: true,
+          antialias: params.get("aa") !== "0",
+          premultipliedAlpha: true,
+          preserveDrawingBuffer: false,
+          powerPreference: "high-performance",
+          failIfMajorPerformanceCaveat: false
+        },
         cacheControl: function(url) {
           // The data file changes whenever the build itself is patched, so it must
           // never be treated as permanently cacheable. Bundles and the wasm pair
