@@ -449,7 +449,7 @@ async function prepareAssetWorker() {
       // the engine filesystem once per browser, then the page reloads so the
       // game boots with it loaded.
       // ------------------------------------------------------------------
-      var SAVE_KEY = "ultraport-starter-save-v1";
+      var SAVE_KEY = "ultraport-starter-save-v2";
 
       function base64ToBytes(value) {
         var binary = atob(value);
@@ -470,17 +470,28 @@ async function prepareAssetWorker() {
       function installStarterSave(instance) {
         try {
           if (localStorage.getItem(SAVE_KEY) === "done") return;
-          var Module = instance && instance.Module;
-          var FS = Module && Module.FS;
+          var Module = (instance && (instance.Module || instance.unityModule)) || window.Module;
+          var FS = Module && (Module.FS || window.FS);
           if (!FS || !FS.readdir || !FS.writeFile) return;
-          var root = Module.persistentDataPath;
-          if (!root) {
-            var entries = FS.readdir("/idbfs").filter(function (name) {
+          // The engine mounts its persistent store at /idbfs and uses one
+          // hashed folder inside it. Prefer whichever folder already holds a
+          // Saves directory, so the path is the one the game itself uses.
+          var root = null;
+          var entries = [];
+          try {
+            entries = FS.readdir("/idbfs").filter(function (name) {
               return name !== "." && name !== "..";
             });
-            if (!entries.length) return;
-            root = "/idbfs/" + entries[0];
+          } catch (err) {}
+          for (var i = 0; i < entries.length && !root; i++) {
+            try {
+              FS.stat("/idbfs/" + entries[i] + "/Saves");
+              root = "/idbfs/" + entries[i];
+            } catch (err) {}
           }
+          if (!root && entries.length) root = "/idbfs/" + entries[0];
+          if (!root) root = Module.persistentDataPath;
+          if (!root) return;
           var slotDir = root + "/Saves/Slot1";
           fetch("save/slot1.json", { cache: "no-store" })
             .then(function (response) { return response.ok ? response.json() : null; })
@@ -490,11 +501,18 @@ async function prepareAssetWorker() {
               var written = 0;
               Object.keys(data.files).forEach(function (name) {
                 var path = slotDir + "/" + name;
-                try { FS.stat(path); return; } catch (err) {}
                 try {
+                  // The engine creates its own empty save as soon as it boots,
+                  // so these files already exist and have to be replaced.
                   FS.writeFile(path, base64ToBytes(data.files[name]));
                   written++;
-                } catch (err) {}
+                } catch (err) {
+                  try {
+                    FS.unlink(path);
+                    FS.writeFile(path, base64ToBytes(data.files[name]));
+                    written++;
+                  } catch (err2) {}
+                }
               });
               if (!written) {
                 localStorage.setItem(SAVE_KEY, "done");
