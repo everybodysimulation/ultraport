@@ -441,6 +441,78 @@ async function prepareAssetWorker() {
   }
 }
 
+      // ------------------------------------------------------------------
+      // Starter save. ULTRAKILL keeps progress in BinaryFormatter files under
+      // <persistentDataPath>/Saves/Slot1. The port ships a prepared set: every
+      // level beaten with a D rank (slow, easy to improve on), every weapon and
+      // variant unlocked, no Cyber Grind or sandbox records. It is written into
+      // the engine filesystem once per browser, then the page reloads so the
+      // game boots with it loaded.
+      // ------------------------------------------------------------------
+      var SAVE_KEY = "ultraport-starter-save-v1";
+
+      function base64ToBytes(value) {
+        var binary = atob(value);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes;
+      }
+
+      function ensureDir(FS, path) {
+        var parts = path.split("/").filter(Boolean);
+        var current = "";
+        for (var i = 0; i < parts.length; i++) {
+          current += "/" + parts[i];
+          try { FS.mkdir(current); } catch (err) {}
+        }
+      }
+
+      function installStarterSave(instance) {
+        try {
+          if (localStorage.getItem(SAVE_KEY) === "done") return;
+          var Module = instance && instance.Module;
+          var FS = Module && Module.FS;
+          if (!FS || !FS.readdir || !FS.writeFile) return;
+          var root = Module.persistentDataPath;
+          if (!root) {
+            var entries = FS.readdir("/idbfs").filter(function (name) {
+              return name !== "." && name !== "..";
+            });
+            if (!entries.length) return;
+            root = "/idbfs/" + entries[0];
+          }
+          var slotDir = root + "/Saves/Slot1";
+          fetch("save/slot1.json", { cache: "no-store" })
+            .then(function (response) { return response.ok ? response.json() : null; })
+            .then(function (data) {
+              if (!data || !data.files) return;
+              ensureDir(FS, slotDir);
+              var written = 0;
+              Object.keys(data.files).forEach(function (name) {
+                var path = slotDir + "/" + name;
+                try { FS.stat(path); return; } catch (err) {}
+                try {
+                  FS.writeFile(path, base64ToBytes(data.files[name]));
+                  written++;
+                } catch (err) {}
+              });
+              if (!written) {
+                localStorage.setItem(SAVE_KEY, "done");
+                return;
+              }
+              var finish = function () {
+                localStorage.setItem(SAVE_KEY, "done");
+                location.reload();
+              };
+              if (FS.syncfs) FS.syncfs(false, finish);
+              else setTimeout(finish, 600);
+            })
+            .catch(function (err) { console.warn("starter save skipped:", err); });
+        } catch (err) {
+          console.warn("starter save skipped:", err);
+        }
+      }
+
       async function loadUnityGame() {
         if (booted) return;
         booted = true;
@@ -464,6 +536,7 @@ async function prepareAssetWorker() {
             progressBarFull.style.width = 100 * progress + "%";
           }).then(function(unityInstance) {
             loadingBar.style.display = "none";
+            installStarterSave(unityInstance);
             updateHint();
             unityInstance.SetFullscreen = function() {
               return 0;
