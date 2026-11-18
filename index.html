@@ -449,7 +449,7 @@ async function prepareAssetWorker() {
       // the engine filesystem once per browser, then the page reloads so the
       // game boots with it loaded.
       // ------------------------------------------------------------------
-      var SAVE_KEY = "ultraport-starter-save-v2";
+      var SAVE_KEY = "ultraport-starter-save-v3";
 
       function base64ToBytes(value) {
         var binary = atob(value);
@@ -465,6 +465,83 @@ async function prepareAssetWorker() {
           current += "/" + parts[i];
           try { FS.mkdir(current); } catch (err) {}
         }
+      }
+
+      // Writing through the engine's own filesystem needs the Module, which some
+      // loaders do not expose, so the save is also written straight into the
+      // engine's IndexedDB store before boot. That store keeps one folder per
+      // site, whose name is read back from the existing keys.
+      var starterSavePromise = null;
+
+      function loadStarterSave() {
+        if (!starterSavePromise) {
+          starterSavePromise = fetch("save/slot1.json", { cache: "no-store" })
+            .then(function (response) { return response.ok ? response.json() : null; })
+            .catch(function () { return null; });
+        }
+        return starterSavePromise;
+      }
+
+      function seedIndexedDbSave(data) {
+        return new Promise(function (resolve) {
+          if (!data || !data.files || !window.indexedDB) { resolve(false); return; }
+          var request;
+          try { request = indexedDB.open("/idbfs", 21); } catch (err) { resolve(false); return; }
+          request.onupgradeneeded = function (event) {
+            var db = event.target.result;
+            var store = db.objectStoreNames.contains("FILE_DATA")
+              ? event.target.transaction.objectStore("FILE_DATA")
+              : db.createObjectStore("FILE_DATA");
+            if (!store.indexNames.contains("timestamp")) {
+              store.createIndex("timestamp", "timestamp", { unique: false });
+            }
+          };
+          request.onerror = function () { resolve(false); };
+          request.onsuccess = function () {
+            var db = request.result;
+            var transaction;
+            try { transaction = db.transaction("FILE_DATA", "readwrite"); } catch (err) { resolve(false); return; }
+            var store = transaction.objectStore("FILE_DATA");
+            var keysRequest = store.getAllKeys();
+            keysRequest.onerror = function () { resolve(false); };
+            keysRequest.onsuccess = function () {
+              var keys = keysRequest.result || [];
+              var folder = null;
+              for (var i = 0; i < keys.length && !folder; i++) {
+                var parts = String(keys[i]).split("/").filter(Boolean);
+                if (parts.length) folder = parts[0];
+              }
+              if (!folder) { resolve(false); return; }
+              var base = "/" + folder + "/Saves/Slot1";
+              var now = new Date();
+              try {
+                store.put({ timestamp: now, mode: 16877, contents: null }, "/" + folder + "/Saves");
+                store.put({ timestamp: now, mode: 16877, contents: null }, base);
+                Object.keys(data.files).forEach(function (name) {
+                  store.put({
+                    timestamp: new Date(),
+                    mode: 33206,
+                    contents: base64ToBytes(data.files[name])
+                  }, base + "/" + name);
+                });
+              } catch (err) { resolve(false); return; }
+              transaction.oncomplete = function () { resolve(true); };
+              transaction.onerror = function () { resolve(false); };
+              transaction.onabort = function () { resolve(false); };
+            };
+          };
+        });
+      }
+
+      // Runs before the engine boots so the slot is already populated when the
+      // game reads it, with no reload needed.
+      async function seedStarterSaveBeforeBoot() {
+        try {
+          if (localStorage.getItem(SAVE_KEY) === "done") return;
+          var data = await loadStarterSave();
+          var seeded = await seedIndexedDbSave(data);
+          if (seeded) localStorage.setItem(SAVE_KEY, "done");
+        } catch (err) {}
       }
 
       function installStarterSave(instance) {
@@ -537,6 +614,7 @@ async function prepareAssetWorker() {
         loadingBar.style.display = "block";
         try {
           await prepareAssetWorker();
+          await seedStarterSaveBeforeBoot();
         } catch (err) {
           var errorText = loadingBar.querySelector("p");
           if (!errorText) {
