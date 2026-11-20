@@ -477,7 +477,7 @@ async function prepareAssetWorker() {
       // the engine filesystem once per browser, then the page reloads so the
       // game boots with it loaded.
       // ------------------------------------------------------------------
-      var SAVE_KEY = "ultraport-starter-save-v6";
+      var SAVE_KEY = "ultraport-starter-save-v7";
 
       function base64ToBytes(value) {
         var binary = atob(value);
@@ -676,89 +676,85 @@ async function prepareAssetWorker() {
         });
       }
 
-      function patchOrSeedEngineSave(data) {
+      // Force the engine to flush its own filesystem into IndexedDB, which is
+      // also how we learn the hashed folder it keeps its save in on a fresh
+      // origin where nothing has been persisted yet.
+      function forceEnginePersist(instance) {
+        var Module = instance && instance.Module;
+        if (!Module || !Module.FS_createDataFile) return false;
+        try {
+          Module.FS_createDataFile("/idbfs", "ultraport-probe", new Uint8Array([1]), true, true, true);
+          return true;
+        } catch (err) {
+          return false;
+        }
+      }
+
+      function installStarterSaveFiles(data) {
         return openEngineStore().then(function (db) {
           return new Promise(function (resolve) {
             var transaction;
             try { transaction = db.transaction("FILE_DATA", "readwrite"); } catch (err) { resolve("none"); return; }
             var store = transaction.objectStore("FILE_DATA");
             var keysRequest = store.getAllKeys();
-            var valuesRequest = store.getAll();
             var settled = false;
             function finish(result) { if (!settled) { settled = true; resolve(result); } }
             transaction.oncomplete = function () { finish("none"); };
             transaction.onerror = function () { finish("none"); };
             transaction.onabort = function () { finish("none"); };
-            function onReady() {
+            keysRequest.onsuccess = function () {
               var keys = keysRequest.result || [];
-              var values = valuesRequest.result || [];
-              var changed = 0;
               var root = null;
-              var folderRoot = null;
+              var slotDir = null;
               for (var i = 0; i < keys.length; i++) {
                 var key = String(keys[i]);
                 var cut = key.indexOf("/Saves");
                 if (cut > 0 && !root) root = key.slice(0, cut);
-                if (!folderRoot) {
-                  var bits = key.split("/").filter(Boolean);
-                  if (bits.length >= 2 && bits[0] === "idbfs") folderRoot = "/idbfs/" + bits[1];
+                if (!slotDir) {
+                  var match = key.match(/^(.*\/Saves\/[^\/]+)\//);
+                  if (match) slotDir = match[1];
                 }
-                var record = values[i];
-                if (!record || !record.contents) continue;
-                var kind = /\/lvl\d+progress\.bepis$/.test(key) ? "rank"
-                  : /\/generalprogress\.bepis$/.test(key) ? "general"
-                  : null;
-                if (!kind) continue;
-                var patched = null;
-                try { patched = patchBepis(new Uint8Array(record.contents), kind); } catch (err) { patched = null; }
-                if (!patched) continue;
-                try {
-                  store.put({ timestamp: new Date(), mode: record.mode || 33206, contents: patched }, key);
-                  changed++;
-                } catch (err) {}
+                if (!root && key.indexOf("ultraport-probe") === -1) {
+                  var bits = key.split("/").filter(Boolean);
+                  if (bits.length >= 2 && bits[0] === "idbfs" && /^[0-9a-f]{8,40}$/i.test(bits[1])) {
+                    root = "/idbfs/" + bits[1];
+                  }
+                }
               }
-              if (changed) { finish("patched"); return; }
-              if (!root) root = folderRoot;
               if (!root) { finish("none"); return; }
+              if (!slotDir) slotDir = root + "/Saves/Slot1";
               try {
-                var base = root + "/Saves/Slot1";
                 store.put({ timestamp: new Date(), mode: 16877, contents: null }, root + "/Saves");
-                store.put({ timestamp: new Date(), mode: 16877, contents: null }, base);
+                store.put({ timestamp: new Date(), mode: 16877, contents: null }, slotDir);
                 Object.keys(data.files).forEach(function (name) {
-                  store.put({ timestamp: new Date(), mode: 33206, contents: base64ToBytes(data.files[name]) }, base + "/" + name);
+                  store.put({ timestamp: new Date(), mode: 33206, contents: base64ToBytes(data.files[name]) }, slotDir + "/" + name);
                 });
                 finish("seeded");
               } catch (err) { finish("none"); }
-            }
-            var pending = 2;
-            function ready() { if (--pending === 0) onReady(); }
-            keysRequest.onsuccess = ready;
-            valuesRequest.onsuccess = ready;
+            };
           });
         }).catch(function () { return "none"; });
       }
 
-      // A brand new origin (a renamed account gives one) has an empty store, so
-      // there is no existing key to read the save folder from before boot. Once
-      // the engine has booted it has created its own folder, so the same seed is
-      // retried here and the page reloads once so the game loads it.
-      function installStarterSaveAfterBoot() {
+      function installStarterSaveAfterBoot(instance) {
         if (localStorage.getItem(SAVE_KEY) === "done") return;
+        var probed = false;
         loadStarterSave().then(function (data) {
           if (!data || !data.files) return;
           var attempts = 0;
-          function trySeed() {
-            patchOrSeedEngineSave(data).then(function (result) {
+          function attempt() {
+            if (!probed) probed = forceEnginePersist(instance);
+            installStarterSaveFiles(data).then(function (result) {
               if (result === "none") {
                 attempts++;
-                if (attempts < 40) setTimeout(trySeed, 500);
+                if (attempts < 40) setTimeout(attempt, 500);
                 return;
               }
               localStorage.setItem(SAVE_KEY, "done");
               location.reload();
             });
           }
-          setTimeout(trySeed, 1000);
+          setTimeout(attempt, 800);
         });
       }
 
@@ -850,7 +846,7 @@ async function prepareAssetWorker() {
             progressBarFull.style.width = 100 * progress + "%";
           }).then(function(unityInstance) {
             loadingBar.style.display = "none";
-            installStarterSaveAfterBoot();
+            installStarterSaveAfterBoot(unityInstance);
             updateHint();
             unityInstance.SetFullscreen = function() {
               return 0;
