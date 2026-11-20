@@ -93,7 +93,7 @@ jobs:
           git fetch origin main
           git checkout -B main origin/main
           python3 - <<'PY'
-          import glob, json
+          import glob, json, os, re
           from pathlib import Path
           from urllib.parse import unquote, quote
 
@@ -107,7 +107,9 @@ jobs:
           if not isinstance(ids, list):
               raise SystemExit("catalog.json has no m_InternalIds array")
 
-          base = "https://everyonesim.github.io/ultraport/asset-proxy/"
+          repo_full = os.environ.get("GITHUB_REPOSITORY", "everyonesim/ultraport")
+          owner, repo_name = repo_full.split("/", 1)
+          base = f"https://{owner}.github.io/{repo_name}/asset-proxy/"
           changed = set()
           for i, value in enumerate(ids):
               if not isinstance(value, str):
@@ -125,17 +127,15 @@ jobs:
 
           index_path = Path("index.html")
           html = index_path.read_text()
-          old_base = "https://github.com/everyonesim/ultraport/releases/download/webgl-assets-v1/"
-          new_base = base
-          for filename in ("WebGL.data.unityweb", "WebGL.framework.js.unityweb", "WebGL.wasm.unityweb"):
-              old = old_base + filename
-              proxy = new_base + filename
-              if old in html:
-                  html = html.replace(old, proxy)
-              elif proxy not in html:
-                  raise SystemExit(f"Expected runtime URL not found in index.html: {filename}")
-
-          import re
+          runtime_urls = {
+              "dataUrl": base + "WebGL.data.unityweb?v=3",
+              "frameworkUrl": base + "WebGL.framework.js.unityweb",
+              "codeUrl": base + "WebGL.wasm.unityweb",
+          }
+          for key, value in runtime_urls.items():
+              html, hits = re.subn(key + r':\s*"[^"]*"', key + ': "' + value + '"', html, count=1)
+              if hits != 1:
+                  raise SystemExit(f"Could not locate {key} in index.html")
 
           # Always normalize the loader URL, whether this is the first run or a rerun.
           html, loader_count = re.subn(
@@ -199,7 +199,7 @@ jobs:
           PY
 
           cat > service-worker.js <<'SW'
-          const RAW_ROOT = "https://raw.githubusercontent.com/everyonesim/ultraport/asset-host/";
+          const RAW_ROOT = "https://raw.githubusercontent.com/__OWNER__/__REPO__/asset-host/";
           const PROXY_PATH = new URL(self.registration.scope).pathname + "asset-proxy/";
 
           self.addEventListener("install", event => event.waitUntil(self.skipWaiting()));
@@ -254,6 +254,13 @@ jobs:
             })));
           });
           SW
+
+          python3 - <<'PY'
+          import os, pathlib
+          owner, repo = os.environ.get("GITHUB_REPOSITORY", "everyonesim/ultraport").split("/", 1)
+          path = pathlib.Path("service-worker.js")
+          path.write_text(path.read_text().replace("__OWNER__", owner).replace("__REPO__", repo))
+          PY
 
           git add index.html StreamingAssets/aa/catalog.json service-worker.js
           if ! git diff --cached --quiet; then

@@ -1,4 +1,4 @@
-const RAW_ROOT = "https://raw.githubusercontent.com/everyonesim/ultraport/asset-host/";
+const RAW_ROOT = "https://raw.githubusercontent.com/foldingchair67/ultraport/asset-host/";
 const PROXY_PATH = new URL(self.registration.scope).pathname + "asset-proxy/";
 
 self.addEventListener("install", event => event.waitUntil(self.skipWaiting()));
