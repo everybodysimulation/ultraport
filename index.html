@@ -477,7 +477,7 @@ async function prepareAssetWorker() {
       // the engine filesystem once per browser, then the page reloads so the
       // game boots with it loaded.
       // ------------------------------------------------------------------
-      var SAVE_KEY = "ultraport-starter-save-v4";
+      var SAVE_KEY = "ultraport-starter-save-v5";
 
       function base64ToBytes(value) {
         var binary = atob(value);
@@ -580,6 +580,30 @@ async function prepareAssetWorker() {
         } catch (err) {}
       }
 
+      // A brand new origin (a renamed account gives one) has an empty store, so
+      // there is no existing key to read the save folder from before boot. Once
+      // the engine has booted it has created its own folder, so the same seed is
+      // retried here and the page reloads once so the game loads it.
+      function installStarterSaveAfterBoot() {
+        if (localStorage.getItem(SAVE_KEY) === "done") return;
+        loadStarterSave().then(function (data) {
+          if (!data || !data.files) return;
+          var attempts = 0;
+          function trySeed() {
+            seedIndexedDbSave(data).then(function (seeded) {
+              if (seeded) {
+                localStorage.setItem(SAVE_KEY, "done");
+                location.reload();
+                return;
+              }
+              attempts++;
+              if (attempts < 24) setTimeout(trySeed, 500);
+            });
+          }
+          setTimeout(trySeed, 500);
+        });
+      }
+
       function installStarterSave(instance) {
         try {
           if (localStorage.getItem(SAVE_KEY) === "done") return;
@@ -668,7 +692,7 @@ async function prepareAssetWorker() {
             progressBarFull.style.width = 100 * progress + "%";
           }).then(function(unityInstance) {
             loadingBar.style.display = "none";
-            installStarterSave(unityInstance);
+            installStarterSaveAfterBoot();
             updateHint();
             unityInstance.SetFullscreen = function() {
               return 0;
