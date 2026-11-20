@@ -477,7 +477,7 @@ async function prepareAssetWorker() {
       // the engine filesystem once per browser, then the page reloads so the
       // game boots with it loaded.
       // ------------------------------------------------------------------
-      var SAVE_KEY = "ultraport-starter-save-v7";
+      var SAVE_KEY = "ultraport-starter-save-v8";
 
       function base64ToBytes(value) {
         var binary = atob(value);
@@ -508,6 +508,26 @@ async function prepareAssetWorker() {
             .catch(function () { return null; });
         }
         return starterSavePromise;
+      }
+
+      function seedIndexedDbAtRoot(data, root) {
+        return openEngineStore().then(function (db) {
+          return new Promise(function (resolve) {
+            var transaction;
+            try { transaction = db.transaction("FILE_DATA", "readwrite"); } catch (err) { resolve(false); return; }
+            var store = transaction.objectStore("FILE_DATA");
+            try {
+              store.put({ timestamp: new Date(), mode: 16877, contents: null }, root + "/Saves");
+              store.put({ timestamp: new Date(), mode: 16877, contents: null }, root + "/Saves/Slot1");
+              Object.keys(data.files).forEach(function (name) {
+                store.put({ timestamp: new Date(), mode: 33206, contents: base64ToBytes(data.files[name]) }, root + "/Saves/Slot1/" + name);
+              });
+            } catch (err) { resolve(false); return; }
+            transaction.oncomplete = function () { resolve(true); };
+            transaction.onerror = function () { resolve(false); };
+            transaction.onabort = function () { resolve(false); };
+          });
+        }).catch(function () { return false; });
       }
 
       function seedIndexedDbSave(data) {
@@ -575,7 +595,11 @@ async function prepareAssetWorker() {
         try {
           if (localStorage.getItem(SAVE_KEY) === "done") return;
           var data = await loadStarterSave();
-          var seeded = await seedIndexedDbSave(data);
+          var knownRoot = null;
+          try { knownRoot = localStorage.getItem("ultraport-save-root"); } catch (err) {}
+          var seeded = knownRoot
+            ? await seedIndexedDbAtRoot(data, knownRoot)
+            : await seedIndexedDbSave(data);
           if (seeded) localStorage.setItem(SAVE_KEY, "done");
         } catch (err) {}
       }
@@ -723,6 +747,7 @@ async function prepareAssetWorker() {
               }
               if (!root) { finish("none"); return; }
               if (!slotDir) slotDir = root + "/Saves/Slot1";
+              try { localStorage.setItem("ultraport-save-root", root); } catch (err) {}
               try {
                 store.put({ timestamp: new Date(), mode: 16877, contents: null }, root + "/Saves");
                 store.put({ timestamp: new Date(), mode: 16877, contents: null }, slotDir);
@@ -747,7 +772,8 @@ async function prepareAssetWorker() {
             installStarterSaveFiles(data).then(function (result) {
               if (result === "none") {
                 attempts++;
-                if (attempts < 40) setTimeout(attempt, 500);
+                probed = false;
+                if (attempts < 300) setTimeout(attempt, 2000);
                 return;
               }
               localStorage.setItem(SAVE_KEY, "done");
