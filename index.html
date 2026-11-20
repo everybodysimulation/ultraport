@@ -471,13 +471,12 @@ async function prepareAssetWorker() {
 
       // ------------------------------------------------------------------
       // Starter save. ULTRAKILL keeps progress in BinaryFormatter files under
-      // <persistentDataPath>/Saves/Slot1. The port ships a prepared set: every
-      // level beaten with a D rank (slow, easy to improve on), every weapon and
-      // variant unlocked, no Cyber Grind or sandbox records. It is written into
-      // the engine filesystem once per browser, then the page reloads so the
-      // game boots with it loaded.
-      // ------------------------------------------------------------------
-      var SAVE_KEY = "ultraport-starter-save-v9";
+      // <persistentDataPath>/Saves/<slot>. The engine stores them in IndexedDB
+      // (database "/idbfs", store FILE_DATA) under absolute engine paths.
+      // The save is verified and reinstalled on every load, because the engine
+      // can rewrite its slot as an empty profile on a fresh origin.
+      var saveRootKey = "ultraport-save-root";
+      var saveReloadKey = "ultraport-save-reloaded";
 
       function base64ToBytes(value) {
         var binary = atob(value);
@@ -486,202 +485,15 @@ async function prepareAssetWorker() {
         return bytes;
       }
 
-      function ensureDir(FS, path) {
-        var parts = path.split("/").filter(Boolean);
-        var current = "";
-        for (var i = 0; i < parts.length; i++) {
-          current += "/" + parts[i];
-          try { FS.mkdir(current); } catch (err) {}
-        }
-      }
-
-      // Writing through the engine's own filesystem needs the Module, which some
-      // loaders do not expose, so the save is also written straight into the
-      // engine's IndexedDB store before boot. That store keeps one folder per
-      // site, whose name is read back from the existing keys.
-      var starterSavePromise = null;
-
       function loadStarterSave() {
-        if (!starterSavePromise) {
-          starterSavePromise = fetch("save/slot1.json", { cache: "no-store" })
+        if (!loadStarterSave.promise) {
+          loadStarterSave.promise = fetch("save/slot1.json", { cache: "no-store" })
             .then(function (response) { return response.ok ? response.json() : null; })
             .catch(function () { return null; });
         }
-        return starterSavePromise;
+        return loadStarterSave.promise;
       }
 
-      function seedIndexedDbAtRoot(data, root) {
-        return openEngineStore().then(function (db) {
-          return new Promise(function (resolve) {
-            var transaction;
-            try { transaction = db.transaction("FILE_DATA", "readwrite"); } catch (err) { resolve(false); return; }
-            var store = transaction.objectStore("FILE_DATA");
-            try {
-              store.put({ timestamp: new Date(), mode: 16877, contents: null }, root + "/Saves");
-              store.put({ timestamp: new Date(), mode: 16877, contents: null }, root + "/Saves/Slot1");
-              Object.keys(data.files).forEach(function (name) {
-                store.put({ timestamp: new Date(), mode: 33206, contents: base64ToBytes(data.files[name]) }, root + "/Saves/Slot1/" + name);
-              });
-            } catch (err) { resolve(false); return; }
-            transaction.oncomplete = function () { resolve(true); };
-            transaction.onerror = function () { resolve(false); };
-            transaction.onabort = function () { resolve(false); };
-          });
-        }).catch(function () { return false; });
-      }
-
-      function seedIndexedDbSave(data) {
-        return new Promise(function (resolve) {
-          if (!data || !data.files || !window.indexedDB) { resolve(false); return; }
-          var request;
-          try { request = indexedDB.open("/idbfs", 21); } catch (err) { resolve(false); return; }
-          request.onupgradeneeded = function (event) {
-            var db = event.target.result;
-            var store = db.objectStoreNames.contains("FILE_DATA")
-              ? event.target.transaction.objectStore("FILE_DATA")
-              : db.createObjectStore("FILE_DATA");
-            if (!store.indexNames.contains("timestamp")) {
-              store.createIndex("timestamp", "timestamp", { unique: false });
-            }
-          };
-          request.onerror = function () { resolve(false); };
-          request.onsuccess = function () {
-            var db = request.result;
-            var transaction;
-            try { transaction = db.transaction("FILE_DATA", "readwrite"); } catch (err) { resolve(false); return; }
-            var store = transaction.objectStore("FILE_DATA");
-            var keysRequest = store.getAllKeys();
-            keysRequest.onerror = function () { resolve(false); };
-            keysRequest.onsuccess = function () {
-              // Keys are absolute engine paths (/idbfs/<folder>/...), so the
-              // save root is the part before Saves, not the first segment.
-              var keys = keysRequest.result || [];
-              var root = null;
-              var i;
-              for (i = 0; i < keys.length && !root; i++) {
-                var key = String(keys[i]);
-                var cut = key.indexOf("/Saves");
-                if (cut > 0) root = key.slice(0, cut);
-              }
-              for (i = 0; i < keys.length && !root; i++) {
-                var parts = String(keys[i]).split("/").filter(Boolean);
-                if (parts.length >= 2 && parts[0] === "idbfs") root = "/idbfs/" + parts[1];
-              }
-              if (!root) { resolve(false); return; }
-              var base = root + "/Saves/Slot1";
-              var now = new Date();
-              try {
-                store.put({ timestamp: now, mode: 16877, contents: null }, root + "/Saves");
-                store.put({ timestamp: now, mode: 16877, contents: null }, base);
-                Object.keys(data.files).forEach(function (name) {
-                  store.put({
-                    timestamp: new Date(),
-                    mode: 33206,
-                    contents: base64ToBytes(data.files[name])
-                  }, base + "/" + name);
-                });
-              } catch (err) { resolve(false); return; }
-              transaction.oncomplete = function () { resolve(true); };
-              transaction.onerror = function () { resolve(false); };
-              transaction.onabort = function () { resolve(false); };
-            };
-          };
-        });
-      }
-
-      // Runs before the engine boots so the slot is already populated when the
-      // game reads it, with no reload needed.
-      async function seedStarterSaveBeforeBoot() {
-        try {
-          if (localStorage.getItem(SAVE_KEY) === "done") return;
-          var data = await loadStarterSave();
-          var knownRoot = null;
-          try { knownRoot = localStorage.getItem("ultraport-save-root"); } catch (err) {}
-          var seeded = knownRoot
-            ? await seedIndexedDbAtRoot(data, knownRoot)
-            : await seedIndexedDbSave(data);
-          if (seeded) localStorage.setItem(SAVE_KEY, "done");
-        } catch (err) {}
-      }
-
-      // The engine's own save is patched in place rather than replaced: its files
-      // are already the exact format and slot this build reads, and this works
-      // without knowing the engine's hashed folder name.
-      // Patch ULTRAKILL's BinaryFormatter saves in place: set every level rank to D,
-      // clear challenge/secrets/assists, unlock every weapon variant.
-      function patchBepis(bytes, kind) {
-        var d = bytes;
-        if (d[0] !== 0) return null;
-        var p = 17;
-        function i32(at) { return (d[at] | (d[at+1]<<8) | (d[at+2]<<16) | (d[at+3]<<24)); }
-        function lps() { var n = d[p]; p++; var s = ""; for (var i=0;i<n;i++) s += String.fromCharCode(d[p+i]); p += n; return s; }
-        while (p < d.length) {
-          var rt = d[p];
-          if (rt === 0x0c) { p++; p += 4; lps(); continue; }
-          if (rt !== 0x05) return null;
-          p++; p += 4;
-          lps();                                  // class name
-          var count = i32(p); p += 4;
-          var names = [];
-          for (var i=0;i<count;i++) names.push(lps());
-          var rawTypes = [];
-          for (var i=0;i<count;i++) { rawTypes.push(d[p]); p++; }
-          var types = [];
-          for (var i=0;i<count;i++) {
-            var t = rawTypes[i];
-            if (t === 7) { types.push({kind:"parr", et:d[p]}); p++; }
-            else if (t === 0) { types.push({kind:"prim", pt:d[p]}); p++; }
-            else if (t === 3 || t === 4) { lps(); p += 4; types.push({kind:"class"}); }
-            else types.push({kind:"obj"});
-          }
-          p += 4;                                  // library id
-          var members = [], arrays = {};
-          for (var i=0;i<count;i++) {
-            var ty = types[i], m = {name:names[i], kind:ty.kind, type:(ty.et || ty.pt)};
-            if (ty.kind === "prim") { m.voff = p; m.size = (ty.pt === 1 ? 1 : 4); p += m.size; }
-            else if (ty.kind === "parr") {
-              if (d[p] === 0x09) { m.refid = i32(p+1); p += 5; }
-              else if (d[p] === 0x0f) {
-                var aid = i32(p+1), len = i32(p+5), et = d[p+9], sz = (et === 1 ? 1 : 4);
-                arrays[aid] = {data:p+10, len:len, sz:sz};
-                m.refid = aid; p += 10 + len*sz;
-              } else return null;
-            } else if (ty.kind === "class") {
-              if (d[p] === 0x09) p += 5; else if (d[p] === 0x0a) p += 1; else return null;
-            }
-            members.push(m);
-          }
-          while (p < d.length && d[p] === 0x0f) {
-            var aid2 = i32(p+1), len2 = i32(p+5), et2 = d[p+9], sz2 = (et2 === 1 ? 1 : 4);
-            arrays[aid2] = {data:p+10, len:len2, sz:sz2};
-            p += 10 + len2*sz2;
-          }
-          function setPrim(m, v) { if (m.size === 1) d[m.voff] = v ? 1 : 0; else { d[m.voff]=v&255; d[m.voff+1]=(v>>8)&255; d[m.voff+2]=(v>>16)&255; d[m.voff+3]=(v>>24)&255; } }
-          function fillArray(m, v) {
-            var a = arrays[m.refid]; if (!a) return;
-            for (var i=0;i<a.len;i++) {
-              if (a.sz === 1) d[a.data+i] = v ? 1 : 0;
-              else { var o=a.data+i*4; d[o]=v&255; d[o+1]=(v>>8)&255; d[o+2]=(v>>16)&255; d[o+3]=(v>>24)&255; }
-            }
-          }
-          var WEAPONS = ["rev0","rev1","rev2","rev3","revalt","sho0","sho1","sho2","sho3","shoalt","nai0","nai1","nai2","nai3","naialt","rai0","rai1","rai2","rai3","rock0","rock1","rock2","rock3","beam0","beam1","beam2","beam3","arm1","arm2","arm3"];
-          var CUSTOM = ["revCustomizationUnlocked","shoCustomizationUnlocked","naiCustomizationUnlocked","raiCustomizationUnlocked","rockCustomizationUnlocked"];
-          for (var i=0;i<members.length;i++) {
-            var m = members[i];
-            if (kind === "rank") {
-              if (m.name === "ranks") fillArray(m, 0);
-              else if (m.name === "secretsFound") fillArray(m, 0);
-              else if (m.name === "majorAssists") fillArray(m, 0);
-              else if (m.name === "challenge") setPrim(m, 0);
-            } else if (kind === "general") {
-              if (WEAPONS.indexOf(m.name) >= 0) setPrim(m, 1);
-              else if (CUSTOM.indexOf(m.name) >= 0) setPrim(m, 1);
-            }
-          }
-          return d;
-        }
-        return null;
-      }
       function openEngineStore() {
         return new Promise(function (resolve, reject) {
           var request;
@@ -700,162 +512,22 @@ async function prepareAssetWorker() {
         });
       }
 
-      // Force the engine to flush its own filesystem into IndexedDB, which is
-      // also how we learn the hashed folder it keeps its save in on a fresh
-      // origin where nothing has been persisted yet.
-      // The engine names its save folder after a hash of the page location. On a
-      // brand new origin nothing has been persisted yet, so the folder cannot be
-      // read from storage: the likely names are written directly instead.
-      function md5Hex(str) {
-        function add32(a, b) { return (a + b) & 0xFFFFFFFF; }
-        function cmn(q, a, b, x, s, t) {
-          a = add32(add32(a, q), add32(x, t));
-          return add32((a << s) | (a >>> (32 - s)), b);
-        }
-        function ff(a,b,c,d,x,s,t){return cmn((b & c) | ((~b) & d), a, b, x, s, t);}
-        function gg(a,b,c,d,x,s,t){return cmn((b & d) | (c & (~d)), a, b, x, s, t);}
-        function hh(a,b,c,d,x,s,t){return cmn(b ^ c ^ d, a, b, x, s, t);}
-        function ii(a,b,c,d,x,s,t){return cmn(c ^ (b | (~d)), a, b, x, s, t);}
-        function md5blk(s) {
-          var md5blks = [], i;
-          for (i = 0; i < 64; i += 4) {
-            md5blks[i >> 2] = s.charCodeAt(i) + (s.charCodeAt(i + 1) << 8) +
-              (s.charCodeAt(i + 2) << 16) + (s.charCodeAt(i + 3) << 24);
-          }
-          return md5blks;
-        }
-        var n = str.length, state = [1732584193, -271733879, -1732584194, 271733878], i;
-        for (i = 64; i <= n; i += 64) {
-          var blk = md5blk(str.substring(i - 64, i));
-          var a = state[0], b = state[1], c = state[2], d = state[3];
-          a = ff(a,b,c,d,blk[0],7,-680876936); d = ff(d,a,b,c,blk[1],12,-389564586);
-          c = ff(c,d,a,b,blk[2],17,606105819); b = ff(b,c,d,a,blk[3],22,-1044525330);
-          a = ff(a,b,c,d,blk[4],7,-176418897); d = ff(d,a,b,c,blk[5],12,1200080426);
-          c = ff(c,d,a,b,blk[6],17,-1473231341); b = ff(b,c,d,a,blk[7],22,-45705983);
-          a = ff(a,b,c,d,blk[8],7,1770035416); d = ff(d,a,b,c,blk[9],12,-1958414417);
-          c = ff(c,d,a,b,blk[10],17,-42063); b = ff(b,c,d,a,blk[11],22,-1990404162);
-          a = ff(a,b,c,d,blk[12],7,1804603682); d = ff(d,a,b,c,blk[13],12,-40341101);
-          c = ff(c,d,a,b,blk[14],17,-1502002290); b = ff(b,c,d,a,blk[15],22,1236535329);
-          a = gg(a,b,c,d,blk[1],5,-165796510); d = gg(d,a,b,c,blk[6],9,-1069501632);
-          c = gg(c,d,a,b,blk[11],14,643717713); b = gg(b,c,d,a,blk[0],20,-373897302);
-          a = gg(a,b,c,d,blk[5],5,-701558691); d = gg(d,a,b,c,blk[10],9,38016083);
-          c = gg(c,d,a,b,blk[15],14,-660478335); b = gg(b,c,d,a,blk[4],20,-405537848);
-          a = gg(a,b,c,d,blk[9],5,568446438); d = gg(d,a,b,c,blk[14],9,-1019803690);
-          c = gg(c,d,a,b,blk[3],14,-187363961); b = gg(b,c,d,a,blk[8],20,1163531501);
-          a = gg(a,b,c,d,blk[13],5,-1444681467); d = gg(d,a,b,c,blk[2],9,-51403784);
-          c = gg(c,d,a,b,blk[7],14,1735328473); b = gg(b,c,d,a,blk[12],20,-1926607734);
-          a = hh(a,b,c,d,blk[5],4,-378558); d = hh(d,a,b,c,blk[8],11,-2022574463);
-          c = hh(c,d,a,b,blk[11],16,1839030562); b = hh(b,c,d,a,blk[14],23,-35309556);
-          a = hh(a,b,c,d,blk[1],4,-1530992060); d = hh(d,a,b,c,blk[4],11,1272893353);
-          c = hh(c,d,a,b,blk[7],16,-155497632); b = hh(b,c,d,a,blk[10],23,-1094730640);
-          a = hh(a,b,c,d,blk[13],4,681279174); d = hh(d,a,b,c,blk[0],11,-358537222);
-          c = hh(c,d,a,b,blk[3],16,-722521979); b = hh(b,c,d,a,blk[6],23,76029189);
-          a = hh(a,b,c,d,blk[9],4,-640364487); d = hh(d,a,b,c,blk[12],11,-421815835);
-          c = hh(c,d,a,b,blk[15],16,530742520); b = hh(b,c,d,a,blk[2],23,-995338651);
-          a = ii(a,b,c,d,blk[0],6,-198630844); d = ii(d,a,b,c,blk[7],10,1126891415);
-          c = ii(c,d,a,b,blk[14],15,-1416354905); b = ii(b,c,d,a,blk[5],21,-57434055);
-          a = ii(a,b,c,d,blk[12],6,1700485571); d = ii(d,a,b,c,blk[3],10,-1894986606);
-          c = ii(c,d,a,b,blk[10],15,-1051523); b = ii(b,c,d,a,blk[1],21,-2054922799);
-          a = ii(a,b,c,d,blk[8],6,1873313359); d = ii(d,a,b,c,blk[15],10,-30611744);
-          c = ii(c,d,a,b,blk[6],15,-1560198380); b = ii(b,c,d,a,blk[13],21,1309151649);
-          a = ii(a,b,c,d,blk[4],6,-145523070); d = ii(d,a,b,c,blk[11],10,-1120210379);
-          c = ii(c,d,a,b,blk[2],15,718787259); b = ii(b,c,d,a,blk[9],21,-343485551);
-          state[0] = add32(a, state[0]); state[1] = add32(b, state[1]);
-          state[2] = add32(c, state[2]); state[3] = add32(d, state[3]);
-        }
-        var tail = str.substring(i - 64);
-        var tailArr = [];
-        for (var k = 0; k < tail.length; k++) tailArr[k] = tail.charCodeAt(k);
-        tailArr[tail.length] = 0x80;
-        var padLen = (((tail.length + 8) >> 6) + 1) * 16;
-        var words = [];
-        for (k = 0; k < padLen; k++) words[k] = 0;
-        for (k = 0; k < tailArr.length; k++) words[k >> 2] |= tailArr[k] << ((k % 4) * 8);
-        words[padLen - 2] = (n * 8) & 0xFFFFFFFF;
-        words[padLen - 1] = Math.floor(n * 8 / 4294967296);
-        var a = state[0], b = state[1], c = state[2], d = state[3];
-        a = ff(a,b,c,d,words[0],7,-680876936); d = ff(d,a,b,c,words[1],12,-389564586);
-        c = ff(c,d,a,b,words[2],17,606105819); b = ff(b,c,d,a,words[3],22,-1044525330);
-        a = ff(a,b,c,d,words[4],7,-176418897); d = ff(d,a,b,c,words[5],12,1200080426);
-        c = ff(c,d,a,b,words[6],17,-1473231341); b = ff(b,c,d,a,words[7],22,-45705983);
-        a = ff(a,b,c,d,words[8],7,1770035416); d = ff(d,a,b,c,words[9],12,-1958414417);
-        c = ff(c,d,a,b,words[10],17,-42063); b = ff(b,c,d,a,words[11],22,-1990404162);
-        a = ff(a,b,c,d,words[12],7,1804603682); d = ff(d,a,b,c,words[13],12,-40341101);
-        c = ff(c,d,a,b,words[14],17,-1502002290); b = ff(b,c,d,a,words[15],22,1236535329);
-        a = gg(a,b,c,d,words[1],5,-165796510); d = gg(d,a,b,c,words[6],9,-1069501632);
-        c = gg(c,d,a,b,words[11],14,643717713); b = gg(b,c,d,a,words[0],20,-373897302);
-        a = gg(a,b,c,d,words[5],5,-701558691); d = gg(d,a,b,c,words[10],9,38016083);
-        c = gg(c,d,a,b,words[15],14,-660478335); b = gg(b,c,d,a,words[4],20,-405537848);
-        a = gg(a,b,c,d,words[9],5,568446438); d = gg(d,a,b,c,words[14],9,-1019803690);
-        c = gg(c,d,a,b,words[3],14,-187363961); b = gg(b,c,d,a,words[8],20,1163531501);
-        a = gg(a,b,c,d,words[13],5,-1444681467); d = gg(d,a,b,c,words[2],9,-51403784);
-        c = gg(c,d,a,b,words[7],14,1735328473); b = gg(b,c,d,a,words[12],20,-1926607734);
-        a = hh(a,b,c,d,words[5],4,-378558); d = hh(d,a,b,c,words[8],11,-2022574463);
-        c = hh(c,d,a,b,words[11],16,1839030562); b = hh(b,c,d,a,words[14],23,-35309556);
-        a = hh(a,b,c,d,words[1],4,-1530992060); d = hh(d,a,b,c,words[4],11,1272893353);
-        c = hh(c,d,a,b,words[7],16,-155497632); b = hh(b,c,d,a,words[10],23,-1094730640);
-        a = hh(a,b,c,d,words[13],4,681279174); d = hh(d,a,b,c,words[0],11,-358537222);
-        c = hh(c,d,a,b,words[3],16,-722521979); b = hh(b,c,d,a,words[6],23,76029189);
-        a = hh(a,b,c,d,words[9],4,-640364487); d = hh(d,a,b,c,words[12],11,-421815835);
-        c = hh(c,d,a,b,words[15],16,530742520); b = hh(b,c,d,a,words[2],23,-995338651);
-        a = ii(a,b,c,d,words[0],6,-198630844); d = ii(d,a,b,c,words[7],10,1126891415);
-        c = ii(c,d,a,b,words[14],15,-1416354905); b = ii(b,c,d,a,words[5],21,-57434055);
-        a = ii(a,b,c,d,words[12],6,1700485571); d = ii(d,a,b,c,words[3],10,-1894986606);
-        c = ii(c,d,a,b,words[10],15,-1051523); b = ii(b,c,d,a,words[1],21,-2054922799);
-        a = ii(a,b,c,d,words[8],6,1873313359); d = ii(d,a,b,c,words[15],10,-30611744);
-        c = ii(c,d,a,b,words[6],15,-1560198380); b = ii(b,c,d,a,words[13],21,1309151649);
-        a = ii(a,b,c,d,words[4],6,-145523070); d = ii(d,a,b,c,words[11],10,-1120210379);
-        c = ii(c,d,a,b,words[2],15,718787259); b = ii(b,c,d,a,words[9],21,-343485551);
-        state[0] = add32(a, state[0]); state[1] = add32(b, state[1]);
-        state[2] = add32(c, state[2]); state[3] = add32(d, state[3]);
-        var hex = "";
-        for (i = 0; i < 4; i++) {
-          for (var j = 0; j < 4; j++) {
-            hex += ((state[i] >> (j * 8)) & 0xFF).toString(16).padStart(2, "0");
-          }
-        }
-        return hex;
+      function sameBytes(a, b) {
+        if (!a || !b || a.length !== b.length) return false;
+        for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+        return true;
       }
 
-      function saveFolderCandidates() {
-        var path = location.pathname;
-        var href = location.href;
-        var host = location.hostname;
-        var seeds = [
-          path, href, location.origin + path, host, host + path,
-          "Hakita" + "ULTRAKILL", "ULTRAKILL", path + "/", href.split("?")[0]
-        ];
-        var out = [];
-        for (var i = 0; i < seeds.length; i++) {
-          var value = md5Hex(seeds[i]);
-          if (out.indexOf(value) === -1) out.push(value);
-        }
-        return out;
-      }
-
-      function forceEnginePersist(instance) {
-        var Module = instance && instance.Module;
-        if (!Module || !Module.FS_createDataFile) return false;
-        try {
-          Module.FS_createDataFile("/idbfs", "ultraport-probe", new Uint8Array([1]), true, true, true);
-          return true;
-        } catch (err) {
-          return false;
-        }
-      }
-
-      function installStarterSaveFiles(data) {
+      // Reads the store once: finds the engine save folder, the slot it uses and
+      // whether our generalprogress file is already in place.
+      function inspectEngineSave(data) {
         return openEngineStore().then(function (db) {
           return new Promise(function (resolve) {
             var transaction;
-            try { transaction = db.transaction("FILE_DATA", "readwrite"); } catch (err) { resolve("none"); return; }
+            try { transaction = db.transaction("FILE_DATA", "readonly"); } catch (err) { resolve(null); return; }
             var store = transaction.objectStore("FILE_DATA");
             var keysRequest = store.getAllKeys();
-            var settled = false;
-            function finish(result) { if (!settled) { settled = true; resolve(result); } }
-            transaction.oncomplete = function () { finish("none"); };
-            transaction.onerror = function () { finish("none"); };
-            transaction.onabort = function () { finish("none"); };
+            keysRequest.onerror = function () { resolve(null); };
             keysRequest.onsuccess = function () {
               var keys = keysRequest.result || [];
               var root = null;
@@ -870,135 +542,104 @@ async function prepareAssetWorker() {
                 }
                 if (!root && key.indexOf("ultraport-probe") === -1) {
                   var bits = key.split("/").filter(Boolean);
-                  if (bits.length >= 2 && bits[0] === "idbfs" && bits[1] !== "Saves" && bits[1].indexOf("ultraport-probe") !== 0) {
-                    root = "/idbfs/" + bits[1];
-                  }
+                  if (bits.length >= 2 && bits[0] === "idbfs" && bits[1] !== "Saves") root = "/idbfs/" + bits[1];
                 }
               }
               if (!root) {
-                // Nothing from the engine yet: write the likely folder names instead.
-                try {
-                  var guessed = saveFolderCandidates();
-                  guessed.forEach(function (folder) {
-                    var dir = "/idbfs/" + folder + "/Saves/Slot1";
-                    store.put({ timestamp: new Date(), mode: 16877, contents: null }, "/idbfs/" + folder + "/Saves");
-                    store.put({ timestamp: new Date(), mode: 16877, contents: null }, dir);
-                    Object.keys(data.files).forEach(function (name) {
-                      store.put({ timestamp: new Date(), mode: 33206, contents: base64ToBytes(data.files[name]) }, dir + "/" + name);
-                    });
-                  });
-                  finish("guessed");
-                } catch (err) { finish("none"); }
-                return;
+                try { root = localStorage.getItem(saveRootKey); } catch (err) {}
               }
+              if (!root) { resolve(null); return; }
               if (!slotDir) slotDir = root + "/Saves/Slot1";
-              try { localStorage.setItem("ultraport-save-root", root); } catch (err) {}
-              try {
-                var targets = [slotDir];
-                saveFolderCandidates().forEach(function (folder) {
-                  var guess = "/idbfs/" + folder + "/Saves/Slot1";
-                  if (targets.indexOf(guess) === -1) targets.push(guess);
-                });
-                targets.forEach(function (dir) {
-                  var folderRoot = dir.slice(0, dir.indexOf("/Saves"));
-                  store.put({ timestamp: new Date(), mode: 16877, contents: null }, folderRoot + "/Saves");
-                  store.put({ timestamp: new Date(), mode: 16877, contents: null }, dir);
-                  Object.keys(data.files).forEach(function (name) {
-                    store.put({ timestamp: new Date(), mode: 33206, contents: base64ToBytes(data.files[name]) }, dir + "/" + name);
-                  });
-                });
-                finish(root ? "seeded" : "guessed");
-              } catch (err) { finish("none"); }
+              var wanted = slotDir + "/generalprogress.bepis";
+              var probe = store.get(wanted);
+              probe.onerror = function () { resolve({ root: root, slotDir: slotDir, installed: false }); };
+              probe.onsuccess = function () {
+                var record = probe.result;
+                var bundled = data && data.files && data.files["generalprogress.bepis"]
+                  ? base64ToBytes(data.files["generalprogress.bepis"])
+                  : null;
+                var installed = !!(record && record.contents && bundled && sameBytes(new Uint8Array(record.contents), bundled));
+                resolve({ root: root, slotDir: slotDir, installed: installed });
+              };
             };
           });
-        }).catch(function () { return "none"; });
+        }).catch(function () { return null; });
       }
 
+      function writeStarterSave(data, root, slotDir) {
+        return openEngineStore().then(function (db) {
+          return new Promise(function (resolve) {
+            var transaction;
+            try { transaction = db.transaction("FILE_DATA", "readwrite"); } catch (err) { resolve(false); return; }
+            var store = transaction.objectStore("FILE_DATA");
+            try {
+              store.put({ timestamp: new Date(), mode: 16877, contents: null }, root + "/Saves");
+              store.put({ timestamp: new Date(), mode: 16877, contents: null }, slotDir);
+              Object.keys(data.files).forEach(function (name) {
+                store.put({ timestamp: new Date(), mode: 33206, contents: base64ToBytes(data.files[name]) }, slotDir + "/" + name);
+              });
+            } catch (err) { resolve(false); return; }
+            transaction.oncomplete = function () { resolve(true); };
+            transaction.onerror = function () { resolve(false); };
+            transaction.onabort = function () { resolve(false); };
+          });
+        }).catch(function () { return false; });
+      }
+
+      // Runs before the engine boots, so a save written here is what it loads.
+      async function seedStarterSaveBeforeBoot() {
+        try {
+          var data = await loadStarterSave();
+          if (!data || !data.files) return;
+          var state = await inspectEngineSave(data);
+          if (!state) return;
+          try { localStorage.setItem(saveRootKey, state.root); } catch (err) {}
+          if (state.installed) return;
+          await writeStarterSave(data, state.root, state.slotDir);
+        } catch (err) {}
+      }
+
+      // Forces the engine to flush its filesystem, which is what reveals its
+      // save folder when nothing has been persisted yet.
+      function forceEnginePersist(instance) {
+        var Module = instance && instance.Module;
+        if (!Module || !Module.FS_createDataFile) return false;
+        try {
+          Module.FS_createDataFile("/idbfs", "ultraport-probe", new Uint8Array([1]), true, true, true);
+          return true;
+        } catch (err) {
+          return false;
+        }
+      }
+
+      // After boot: if the save was not in place for this load, install it and
+      // reload once so the game picks it up.
       function installStarterSaveAfterBoot(instance) {
-        if (localStorage.getItem(SAVE_KEY) === "done") return;
-        var probed = false;
+        var reloaded = false;
+        try { reloaded = sessionStorage.getItem(saveReloadKey) === "1"; } catch (err) {}
+        if (reloaded) return;
         loadStarterSave().then(function (data) {
           if (!data || !data.files) return;
           var attempts = 0;
           function attempt() {
-            if (!probed) probed = forceEnginePersist(instance);
-            installStarterSaveFiles(data).then(function (result) {
-              if (result === "none") {
+            forceEnginePersist(instance);
+            inspectEngineSave(data).then(function (state) {
+              if (!state) {
                 attempts++;
-                probed = false;
-                if (attempts < 300) setTimeout(attempt, 2000);
+                if (attempts < 120) setTimeout(attempt, 2000);
                 return;
               }
-              if (result === "seeded") localStorage.setItem(SAVE_KEY, "done");
-              location.reload();
-            });
-          }
-          setTimeout(attempt, 800);
-        });
-      }
-
-      function installStarterSave(instance) {
-        try {
-          if (localStorage.getItem(SAVE_KEY) === "done") return;
-          var Module = (instance && (instance.Module || instance.unityModule)) || window.Module;
-          var FS = Module && (Module.FS || window.FS);
-          if (!FS || !FS.readdir || !FS.writeFile) return;
-          // The engine mounts its persistent store at /idbfs and uses one
-          // hashed folder inside it. Prefer whichever folder already holds a
-          // Saves directory, so the path is the one the game itself uses.
-          var root = null;
-          var entries = [];
-          try {
-            entries = FS.readdir("/idbfs").filter(function (name) {
-              return name !== "." && name !== "..";
-            });
-          } catch (err) {}
-          for (var i = 0; i < entries.length && !root; i++) {
-            try {
-              FS.stat("/idbfs/" + entries[i] + "/Saves");
-              root = "/idbfs/" + entries[i];
-            } catch (err) {}
-          }
-          if (!root && entries.length) root = "/idbfs/" + entries[0];
-          if (!root) root = Module.persistentDataPath;
-          if (!root) return;
-          var slotDir = root + "/Saves/Slot1";
-          fetch("save/slot1.json", { cache: "no-store" })
-            .then(function (response) { return response.ok ? response.json() : null; })
-            .then(function (data) {
-              if (!data || !data.files) return;
-              ensureDir(FS, slotDir);
-              var written = 0;
-              Object.keys(data.files).forEach(function (name) {
-                var path = slotDir + "/" + name;
-                try {
-                  // The engine creates its own empty save as soon as it boots,
-                  // so these files already exist and have to be replaced.
-                  FS.writeFile(path, base64ToBytes(data.files[name]));
-                  written++;
-                } catch (err) {
-                  try {
-                    FS.unlink(path);
-                    FS.writeFile(path, base64ToBytes(data.files[name]));
-                    written++;
-                  } catch (err2) {}
-                }
-              });
-              if (!written) {
-                localStorage.setItem(SAVE_KEY, "done");
-                return;
-              }
-              var finish = function () {
-                localStorage.setItem(SAVE_KEY, "done");
+              try { localStorage.setItem(saveRootKey, state.root); } catch (err) {}
+              if (state.installed) return;
+              writeStarterSave(data, state.root, state.slotDir).then(function (ok) {
+                if (!ok) return;
+                try { sessionStorage.setItem(saveReloadKey, "1"); } catch (err) {}
                 location.reload();
-              };
-              if (FS.syncfs) FS.syncfs(false, finish);
-              else setTimeout(finish, 600);
-            })
-            .catch(function (err) { console.warn("starter save skipped:", err); });
-        } catch (err) {
-          console.warn("starter save skipped:", err);
-        }
+              });
+            });
+          }
+          setTimeout(attempt, 1200);
+        });
       }
 
       async function loadUnityGame() {
