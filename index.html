@@ -477,7 +477,7 @@ async function prepareAssetWorker() {
       // the engine filesystem once per browser, then the page reloads so the
       // game boots with it loaded.
       // ------------------------------------------------------------------
-      var SAVE_KEY = "ultraport-starter-save-v5";
+      var SAVE_KEY = "ultraport-starter-save-v6";
 
       function base64ToBytes(value) {
         var binary = atob(value);
@@ -580,6 +580,164 @@ async function prepareAssetWorker() {
         } catch (err) {}
       }
 
+      // The engine's own save is patched in place rather than replaced: its files
+      // are already the exact format and slot this build reads, and this works
+      // without knowing the engine's hashed folder name.
+      // Patch ULTRAKILL's BinaryFormatter saves in place: set every level rank to D,
+      // clear challenge/secrets/assists, unlock every weapon variant.
+      function patchBepis(bytes, kind) {
+        var d = bytes;
+        if (d[0] !== 0) return null;
+        var p = 17;
+        function i32(at) { return (d[at] | (d[at+1]<<8) | (d[at+2]<<16) | (d[at+3]<<24)); }
+        function lps() { var n = d[p]; p++; var s = ""; for (var i=0;i<n;i++) s += String.fromCharCode(d[p+i]); p += n; return s; }
+        while (p < d.length) {
+          var rt = d[p];
+          if (rt === 0x0c) { p++; p += 4; lps(); continue; }
+          if (rt !== 0x05) return null;
+          p++; p += 4;
+          lps();                                  // class name
+          var count = i32(p); p += 4;
+          var names = [];
+          for (var i=0;i<count;i++) names.push(lps());
+          var rawTypes = [];
+          for (var i=0;i<count;i++) { rawTypes.push(d[p]); p++; }
+          var types = [];
+          for (var i=0;i<count;i++) {
+            var t = rawTypes[i];
+            if (t === 7) { types.push({kind:"parr", et:d[p]}); p++; }
+            else if (t === 0) { types.push({kind:"prim", pt:d[p]}); p++; }
+            else if (t === 3 || t === 4) { lps(); p += 4; types.push({kind:"class"}); }
+            else types.push({kind:"obj"});
+          }
+          p += 4;                                  // library id
+          var members = [], arrays = {};
+          for (var i=0;i<count;i++) {
+            var ty = types[i], m = {name:names[i], kind:ty.kind, type:(ty.et || ty.pt)};
+            if (ty.kind === "prim") { m.voff = p; m.size = (ty.pt === 1 ? 1 : 4); p += m.size; }
+            else if (ty.kind === "parr") {
+              if (d[p] === 0x09) { m.refid = i32(p+1); p += 5; }
+              else if (d[p] === 0x0f) {
+                var aid = i32(p+1), len = i32(p+5), et = d[p+9], sz = (et === 1 ? 1 : 4);
+                arrays[aid] = {data:p+10, len:len, sz:sz};
+                m.refid = aid; p += 10 + len*sz;
+              } else return null;
+            } else if (ty.kind === "class") {
+              if (d[p] === 0x09) p += 5; else if (d[p] === 0x0a) p += 1; else return null;
+            }
+            members.push(m);
+          }
+          while (p < d.length && d[p] === 0x0f) {
+            var aid2 = i32(p+1), len2 = i32(p+5), et2 = d[p+9], sz2 = (et2 === 1 ? 1 : 4);
+            arrays[aid2] = {data:p+10, len:len2, sz:sz2};
+            p += 10 + len2*sz2;
+          }
+          function setPrim(m, v) { if (m.size === 1) d[m.voff] = v ? 1 : 0; else { d[m.voff]=v&255; d[m.voff+1]=(v>>8)&255; d[m.voff+2]=(v>>16)&255; d[m.voff+3]=(v>>24)&255; } }
+          function fillArray(m, v) {
+            var a = arrays[m.refid]; if (!a) return;
+            for (var i=0;i<a.len;i++) {
+              if (a.sz === 1) d[a.data+i] = v ? 1 : 0;
+              else { var o=a.data+i*4; d[o]=v&255; d[o+1]=(v>>8)&255; d[o+2]=(v>>16)&255; d[o+3]=(v>>24)&255; }
+            }
+          }
+          var WEAPONS = ["rev0","rev1","rev2","rev3","revalt","sho0","sho1","sho2","sho3","shoalt","nai0","nai1","nai2","nai3","naialt","rai0","rai1","rai2","rai3","rock0","rock1","rock2","rock3","beam0","beam1","beam2","beam3","arm1","arm2","arm3"];
+          var CUSTOM = ["revCustomizationUnlocked","shoCustomizationUnlocked","naiCustomizationUnlocked","raiCustomizationUnlocked","rockCustomizationUnlocked"];
+          for (var i=0;i<members.length;i++) {
+            var m = members[i];
+            if (kind === "rank") {
+              if (m.name === "ranks") fillArray(m, 0);
+              else if (m.name === "secretsFound") fillArray(m, 0);
+              else if (m.name === "majorAssists") fillArray(m, 0);
+              else if (m.name === "challenge") setPrim(m, 0);
+            } else if (kind === "general") {
+              if (WEAPONS.indexOf(m.name) >= 0) setPrim(m, 1);
+              else if (CUSTOM.indexOf(m.name) >= 0) setPrim(m, 1);
+            }
+          }
+          return d;
+        }
+        return null;
+      }
+      function openEngineStore() {
+        return new Promise(function (resolve, reject) {
+          var request;
+          try { request = indexedDB.open("/idbfs", 21); } catch (err) { reject(err); return; }
+          request.onupgradeneeded = function (event) {
+            var db = event.target.result;
+            var store = db.objectStoreNames.contains("FILE_DATA")
+              ? event.target.transaction.objectStore("FILE_DATA")
+              : db.createObjectStore("FILE_DATA");
+            if (!store.indexNames.contains("timestamp")) {
+              store.createIndex("timestamp", "timestamp", { unique: false });
+            }
+          };
+          request.onerror = function () { reject(request.error); };
+          request.onsuccess = function () { resolve(request.result); };
+        });
+      }
+
+      function patchOrSeedEngineSave(data) {
+        return openEngineStore().then(function (db) {
+          return new Promise(function (resolve) {
+            var transaction;
+            try { transaction = db.transaction("FILE_DATA", "readwrite"); } catch (err) { resolve("none"); return; }
+            var store = transaction.objectStore("FILE_DATA");
+            var keysRequest = store.getAllKeys();
+            var valuesRequest = store.getAll();
+            var settled = false;
+            function finish(result) { if (!settled) { settled = true; resolve(result); } }
+            transaction.oncomplete = function () { finish("none"); };
+            transaction.onerror = function () { finish("none"); };
+            transaction.onabort = function () { finish("none"); };
+            function onReady() {
+              var keys = keysRequest.result || [];
+              var values = valuesRequest.result || [];
+              var changed = 0;
+              var root = null;
+              var folderRoot = null;
+              for (var i = 0; i < keys.length; i++) {
+                var key = String(keys[i]);
+                var cut = key.indexOf("/Saves");
+                if (cut > 0 && !root) root = key.slice(0, cut);
+                if (!folderRoot) {
+                  var bits = key.split("/").filter(Boolean);
+                  if (bits.length >= 2 && bits[0] === "idbfs") folderRoot = "/idbfs/" + bits[1];
+                }
+                var record = values[i];
+                if (!record || !record.contents) continue;
+                var kind = /\/lvl\d+progress\.bepis$/.test(key) ? "rank"
+                  : /\/generalprogress\.bepis$/.test(key) ? "general"
+                  : null;
+                if (!kind) continue;
+                var patched = null;
+                try { patched = patchBepis(new Uint8Array(record.contents), kind); } catch (err) { patched = null; }
+                if (!patched) continue;
+                try {
+                  store.put({ timestamp: new Date(), mode: record.mode || 33206, contents: patched }, key);
+                  changed++;
+                } catch (err) {}
+              }
+              if (changed) { finish("patched"); return; }
+              if (!root) root = folderRoot;
+              if (!root) { finish("none"); return; }
+              try {
+                var base = root + "/Saves/Slot1";
+                store.put({ timestamp: new Date(), mode: 16877, contents: null }, root + "/Saves");
+                store.put({ timestamp: new Date(), mode: 16877, contents: null }, base);
+                Object.keys(data.files).forEach(function (name) {
+                  store.put({ timestamp: new Date(), mode: 33206, contents: base64ToBytes(data.files[name]) }, base + "/" + name);
+                });
+                finish("seeded");
+              } catch (err) { finish("none"); }
+            }
+            var pending = 2;
+            function ready() { if (--pending === 0) onReady(); }
+            keysRequest.onsuccess = ready;
+            valuesRequest.onsuccess = ready;
+          });
+        }).catch(function () { return "none"; });
+      }
+
       // A brand new origin (a renamed account gives one) has an empty store, so
       // there is no existing key to read the save folder from before boot. Once
       // the engine has booted it has created its own folder, so the same seed is
@@ -590,17 +748,17 @@ async function prepareAssetWorker() {
           if (!data || !data.files) return;
           var attempts = 0;
           function trySeed() {
-            seedIndexedDbSave(data).then(function (seeded) {
-              if (seeded) {
-                localStorage.setItem(SAVE_KEY, "done");
-                location.reload();
+            patchOrSeedEngineSave(data).then(function (result) {
+              if (result === "none") {
+                attempts++;
+                if (attempts < 40) setTimeout(trySeed, 500);
                 return;
               }
-              attempts++;
-              if (attempts < 24) setTimeout(trySeed, 500);
+              localStorage.setItem(SAVE_KEY, "done");
+              location.reload();
             });
           }
-          setTimeout(trySeed, 500);
+          setTimeout(trySeed, 1000);
         });
       }
 
